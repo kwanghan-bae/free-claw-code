@@ -6112,6 +6112,34 @@ fn parse_skill_description(contents: &str) -> Option<String> {
 pub mod lane_completion;
 pub mod pdf_extract;
 
+pub mod test_helpers {
+    use telemetry::{SessionTracer, TraceContext};
+
+    #[must_use]
+    pub fn execute_tool_with_span(
+        tracer: &SessionTracer,
+        parent: TraceContext,
+        tool_name: &str,
+        _params: serde_json::Value,
+    ) -> serde_json::Value {
+        let guard = tracer.start_span(
+            parent,
+            "tool_call",
+            serde_json::Map::from_iter([(
+                "tool_name".into(),
+                serde_json::Value::String(tool_name.into()),
+            )]),
+        );
+        let result = if tool_name == "NoopTool" {
+            serde_json::json!({"ok": true})
+        } else {
+            unimplemented!("only NoopTool is supported in test_helpers")
+        };
+        guard.add_attribute("success", serde_json::Value::Bool(true));
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

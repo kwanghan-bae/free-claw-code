@@ -1617,6 +1617,7 @@ dependencies = [
  "runtime",
  "serde",
  "serde_json",
+ "telemetry",
  "tokio",
 ]
 
