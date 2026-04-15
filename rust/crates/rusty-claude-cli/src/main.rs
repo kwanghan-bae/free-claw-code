@@ -6,6 +6,7 @@
     clippy::unnecessary_wraps,
     clippy::unused_self
 )]
+mod doctor;
 mod init;
 mod input;
 mod render;
@@ -1488,6 +1489,7 @@ fn render_doctor_report() -> Result<DoctorReport, Box<dyn std::error::Error>> {
             check_workspace_health(&context),
             check_sandbox_health(&context.sandbox_status),
             check_system_health(&cwd, config.as_ref().ok()),
+            check_router_health(),
         ],
     })
 }
@@ -1964,6 +1966,28 @@ fn check_system_health(cwd: &Path, config: Option<&runtime::RuntimeConfig>) -> D
         ("git_sha".to_string(), json!(GIT_SHA)),
         ("default_model".to_string(), json!(default_model)),
     ]))
+}
+
+fn check_router_health() -> DiagnosticCheck {
+    let base_url =
+        env::var("CLAW_ROUTER_URL").unwrap_or_else(|_| "http://127.0.0.1:7801".to_string());
+    let report = tokio::runtime::Runtime::new()
+        .expect("tokio runtime for router health probe")
+        .block_on(doctor::router_health_probe(&base_url));
+    if report.healthy {
+        let summary = match report.catalog_version.as_deref() {
+            Some(v) => format!("router: ok (catalog {v})"),
+            None => "router: ok".to_string(),
+        };
+        DiagnosticCheck::new("Router", DiagnosticLevel::Ok, summary)
+    } else {
+        let err_msg = report.error.as_deref().unwrap_or("unknown error");
+        DiagnosticCheck::new(
+            "Router",
+            DiagnosticLevel::Warn,
+            format!("router: DOWN — {err_msg}"),
+        )
+    }
 }
 
 fn resume_command_can_absorb_token(current_command: &str, token: &str) -> bool {
