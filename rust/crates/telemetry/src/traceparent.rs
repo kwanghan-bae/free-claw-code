@@ -11,9 +11,14 @@ pub struct SpanId(pub [u8; 8]);
 impl TraceId {
     #[must_use]
     pub fn random() -> Self {
-        let mut bytes = [0u8; 16];
-        rand::thread_rng().fill_bytes(&mut bytes);
-        Self(bytes)
+        loop {
+            let mut bytes = [0u8; 16];
+            rand::thread_rng().fill_bytes(&mut bytes);
+            let id = Self(bytes);
+            if !id.is_zero() {
+                return id;
+            }
+        }
     }
     #[must_use]
     pub fn is_zero(&self) -> bool {
@@ -24,9 +29,14 @@ impl TraceId {
 impl SpanId {
     #[must_use]
     pub fn random() -> Self {
-        let mut bytes = [0u8; 8];
-        rand::thread_rng().fill_bytes(&mut bytes);
-        Self(bytes)
+        loop {
+            let mut bytes = [0u8; 8];
+            rand::thread_rng().fill_bytes(&mut bytes);
+            let id = Self(bytes);
+            if !id.is_zero() {
+                return id;
+            }
+        }
     }
     #[must_use]
     pub fn is_zero(&self) -> bool {
@@ -87,6 +97,9 @@ impl TraceContext {
         if parts[1].len() != 32 || parts[2].len() != 16 || parts[3].len() != 2 {
             return None;
         }
+        if !parts[1].is_ascii() || !parts[2].is_ascii() || !parts[3].is_ascii() {
+            return None;
+        }
         let mut trace = [0u8; 16];
         for (i, byte) in trace.iter_mut().enumerate() {
             *byte = u8::from_str_radix(&parts[1][i * 2..i * 2 + 2], 16).ok()?;
@@ -138,6 +151,16 @@ mod tests {
     #[test]
     fn traceparent_decode_rejects_short_id() {
         assert!(TraceContext::decode("00-abc-def-01").is_none());
+    }
+
+    #[test]
+    fn traceparent_decode_rejects_non_ascii_segments() {
+        // 29 ASCII + 1 three-byte snowman: len() == 32 in bytes but non-ASCII.
+        let bad = format!("00-{}\u{2603}-00f067aa0ba902b7-01", "a".repeat(29),);
+        assert!(TraceContext::decode(&bad).is_none());
+        // Also verify no panic on all-unicode trace segment.
+        let uni_trace = "00-🦀".to_string() + &"ab".repeat(14) + "-00f067aa0ba902b7-01";
+        assert!(TraceContext::decode(&uni_trace).is_none());
     }
 
     #[test]
