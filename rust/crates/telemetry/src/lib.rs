@@ -580,5 +580,19 @@ mod tests {
         };
         let s2 = serde_json::to_string(&end).unwrap();
         assert!(s2.contains("\"type\":\"span_ended\""));
+        let parsed_end: TelemetryEvent = serde_json::from_str(&s2).unwrap();
+        match parsed_end {
+            TelemetryEvent::SpanEnded {
+                span_id,
+                status,
+                duration_ms,
+                ..
+            } => {
+                assert_eq!(span_id, sid);
+                assert_eq!(status, "ok");
+                assert_eq!(duration_ms, 42);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }
