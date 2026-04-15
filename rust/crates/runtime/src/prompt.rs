@@ -522,37 +522,51 @@ fn get_actions_section() -> String {
 /// The returned label is attached to outbound API requests as the
 /// `x-free-claw-hints` header so the upstream router can make
 /// scheduling and model-selection decisions.
+///
+/// Single-word keywords are matched against whitespace-split words to
+/// avoid false positives (e.g. `"run"` should not match `"runtime"`).
+/// Multi-word phrases fall back to substring matching.
 #[must_use]
 pub fn classify_task_hint(user_message: &str) -> &'static str {
     const PLANNING: &[&str] = &["design", "architect", "plan", "approach", "strategy"];
-    const CODING: &[&str] = &[
+    const CODING_PHRASES: &[&str] = &[
         "refactor",
         "implement",
         "fix",
         "bug",
+        "patch",
         "unit test",
         "integration test",
         "add function",
         "add method",
         "write tests",
-        "patch",
     ];
     const TOOL_HEAVY: &[&str] = &["run", "execute", "search", "grep", "shell"];
     const SUMMARY: &[&str] = &["summarize", "summary", "tl;dr", "condense"];
 
     let lower = user_message.to_lowercase();
+    let words: std::collections::HashSet<&str> = lower.split_whitespace().collect();
 
-    if PLANNING.iter().any(|k| lower.contains(k)) {
+    if PLANNING.iter().any(|k| words.contains(k)) {
         return "planning";
     }
-    if TOOL_HEAVY.iter().any(|k| lower.contains(k)) {
+    if SUMMARY
+        .iter()
+        .any(|k| words.contains(k) || lower.contains(k))
+    {
+        return "summary";
+    }
+    if TOOL_HEAVY.iter().any(|k| words.contains(k)) {
         return "tool_heavy";
     }
-    if CODING.iter().any(|k| lower.contains(k)) {
+    if CODING_PHRASES.iter().any(|k| {
+        if k.contains(' ') {
+            lower.contains(k)
+        } else {
+            words.contains(k)
+        }
+    }) {
         return "coding";
-    }
-    if SUMMARY.iter().any(|k| lower.contains(k)) {
-        return "summary";
     }
     "chat"
 }
@@ -583,6 +597,27 @@ mod hint_tests {
     #[test]
     fn classify_default_chat() {
         assert_eq!(classify_task_hint("hello"), "chat");
+    }
+
+    #[test]
+    fn classify_tool_heavy_request() {
+        assert_eq!(
+            classify_task_hint("execute the shell command"),
+            "tool_heavy"
+        );
+        assert_eq!(classify_task_hint("run the test suite"), "tool_heavy");
+        assert_eq!(classify_task_hint("grep for FIXME"), "tool_heavy");
+    }
+
+    #[test]
+    fn classify_no_longer_confuses_run_substring() {
+        // "runtime" should not trigger tool_heavy.
+        assert_eq!(classify_task_hint("summarize the runtime logs"), "summary");
+        // "running" (gerund) shouldn't trigger tool_heavy either.
+        assert_eq!(
+            classify_task_hint("hello how are you running today"),
+            "chat"
+        );
     }
 }
 

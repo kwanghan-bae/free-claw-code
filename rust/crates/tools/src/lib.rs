@@ -4543,6 +4543,15 @@ impl ProviderRuntimeClient {
             allowed_tools,
         })
     }
+
+    /// Reset per-request hints and trace context on every provider in the
+    /// chain to avoid state leaking across turns.
+    fn clear_per_request_state(&mut self) {
+        for entry in &mut self.chain {
+            entry.client.clear_hints();
+            entry.client.clear_trace_context();
+        }
+    }
 }
 
 fn build_provider_entry(model: &str) -> Result<ProviderEntry, String> {
@@ -4578,10 +4587,23 @@ impl ApiClient for ProviderRuntimeClient {
             (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n"));
         let tool_choice = (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
 
-        let runtime = &self.runtime;
-        let chain = &self.chain;
+        // Apply per-request hints and trace context so the provider client
+        // emits the x-free-claw-hints and traceparent headers on the wire.
+        if let Some(h) = request.task_hint.as_deref() {
+            for entry in &mut self.chain {
+                entry.client.set_hints(h);
+            }
+        }
+        if let Some(ctx) = request.trace_context {
+            for entry in &mut self.chain {
+                entry.client.set_trace_context(ctx);
+            }
+        }
+
+        let chain_len = self.chain.len();
         let mut last_error: Option<ApiError> = None;
-        for (index, entry) in chain.iter().enumerate() {
+        for index in 0..chain_len {
+            let entry = &self.chain[index];
             let message_request = MessageRequest {
                 model: entry.model.clone(),
                 max_tokens: max_tokens_for_model(&entry.model),
@@ -4593,20 +4615,29 @@ impl ApiClient for ProviderRuntimeClient {
                 ..Default::default()
             };
 
-            let attempt = runtime.block_on(stream_with_provider(&entry.client, &message_request));
+            let attempt = self
+                .runtime
+                .block_on(stream_with_provider(&entry.client, &message_request));
             match attempt {
-                Ok(events) => return Ok(events),
-                Err(error) if error.is_retryable() && index + 1 < chain.len() => {
+                Ok(events) => {
+                    self.clear_per_request_state();
+                    return Ok(events);
+                }
+                Err(error) if error.is_retryable() && index + 1 < chain_len => {
                     eprintln!(
                         "provider {} failed with retryable error, falling back: {error}",
-                        entry.model
+                        self.chain[index].model
                     );
                     last_error = Some(error);
                 }
-                Err(error) => return Err(RuntimeError::new(error.to_string())),
+                Err(error) => {
+                    self.clear_per_request_state();
+                    return Err(RuntimeError::new(error.to_string()));
+                }
             }
         }
 
+        self.clear_per_request_state();
         Err(RuntimeError::new(last_error.map_or_else(
             || String::from("provider chain exhausted with no attempts"),
             |error| error.to_string(),

@@ -27,6 +27,9 @@ pub struct ApiRequest {
     /// `"planning"`). Passed through to the provider client so it can be emitted
     /// as the `x-free-claw-hints` header.
     pub task_hint: Option<String>,
+    /// Propagation context for the W3C `traceparent` header, forwarded from
+    /// the session so the provider client can emit it on the wire.
+    pub trace_context: Option<telemetry::TraceContext>,
 }
 
 /// Streamed events emitted while processing a single assistant turn.
@@ -358,6 +361,7 @@ where
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
                 task_hint: Some(task_hint.clone()),
+                trace_context: self.session.trace_context,
             };
             let events = match self.api_client.stream(request) {
                 Ok(events) => events,

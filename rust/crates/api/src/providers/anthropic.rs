@@ -237,6 +237,22 @@ impl AnthropicClient {
         self
     }
 
+    pub fn set_trace_context(&mut self, ctx: TraceContext) {
+        self.trace_context = Some(ctx);
+    }
+
+    pub fn clear_trace_context(&mut self) {
+        self.trace_context = None;
+    }
+
+    pub fn set_hints(&mut self, hints: impl Into<String>) {
+        self.hints = Some(hints.into());
+    }
+
+    pub fn clear_hints(&mut self) {
+        self.hints = None;
+    }
+
     #[must_use]
     pub fn with_client_identity(mut self, client_identity: ClientIdentity) -> Self {
         self.request_profile.client_identity = client_identity;
