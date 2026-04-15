@@ -5,6 +5,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use telemetry::TraceContext;
+
 use crate::error::ApiError;
 use crate::http_client::build_http_client_or_default;
 use crate::types::{
@@ -92,6 +94,7 @@ pub struct OpenAiCompatClient {
     max_retries: u32,
     initial_backoff: Duration,
     max_backoff: Duration,
+    trace_context: Option<TraceContext>,
 }
 
 impl OpenAiCompatClient {
@@ -113,6 +116,7 @@ impl OpenAiCompatClient {
             max_retries: DEFAULT_MAX_RETRIES,
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
             max_backoff: DEFAULT_MAX_BACKOFF,
+            trace_context: None,
         }
     }
 
@@ -142,6 +146,12 @@ impl OpenAiCompatClient {
         self.max_retries = max_retries;
         self.initial_backoff = initial_backoff;
         self.max_backoff = max_backoff;
+        self
+    }
+
+    #[must_use]
+    pub fn with_trace_context(mut self, ctx: TraceContext) -> Self {
+        self.trace_context = Some(ctx);
         self
     }
 
@@ -250,14 +260,16 @@ impl OpenAiCompatClient {
         request: &MessageRequest,
     ) -> Result<reqwest::Response, ApiError> {
         let request_url = chat_completions_endpoint(&self.base_url);
-        self.http
+        let mut req = self
+            .http
             .post(&request_url)
             .header("content-type", "application/json")
             .bearer_auth(&self.api_key)
-            .json(&build_chat_completion_request(request, self.config()))
-            .send()
-            .await
-            .map_err(ApiError::from)
+            .json(&build_chat_completion_request(request, self.config()));
+        if let Some(ctx) = self.trace_context {
+            req = req.header("traceparent", ctx.encode());
+        }
+        req.send().await.map_err(ApiError::from)
     }
 
     fn backoff_for_attempt(&self, attempt: u32) -> Result<Duration, ApiError> {

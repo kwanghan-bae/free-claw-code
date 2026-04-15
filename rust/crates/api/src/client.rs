@@ -56,6 +56,15 @@ impl ProviderClient {
     }
 
     #[must_use]
+    pub fn with_trace_context(self, ctx: telemetry::TraceContext) -> Self {
+        match self {
+            Self::Anthropic(client) => Self::Anthropic(client.with_trace_context(ctx)),
+            Self::Xai(client) => Self::Xai(client.with_trace_context(ctx)),
+            Self::OpenAi(client) => Self::OpenAi(client.with_trace_context(ctx)),
+        }
+    }
+
+    #[must_use]
     pub fn with_prompt_cache(self, prompt_cache: PromptCache) -> Self {
         match self {
             Self::Anthropic(client) => Self::Anthropic(client.with_prompt_cache(prompt_cache)),
