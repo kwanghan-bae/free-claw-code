@@ -203,6 +203,23 @@ pub enum TelemetryEvent {
     },
     Analytics(AnalyticsEvent),
     SessionTrace(SessionTraceRecord),
+    SpanStarted {
+        trace_id: TraceId,
+        span_id: SpanId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_span_id: Option<SpanId>,
+        op_name: String,
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        attributes: Map<String, Value>,
+    },
+    SpanEnded {
+        span_id: SpanId,
+        status: String,
+        duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        attributes: Map<String, Value>,
+    },
 }
 
 pub trait TelemetrySink: Send + Sync {
@@ -525,5 +542,43 @@ mod tests {
         assert!(contents.contains("\"action\":\"turn_completed\""));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn span_started_and_ended_events_serialize_roundtrip() {
+        let tid = TraceId([
+            0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e,
+            0x47, 0x36,
+        ]);
+        let sid = SpanId([0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7]);
+        let ev = TelemetryEvent::SpanStarted {
+            trace_id: tid,
+            span_id: sid,
+            parent_span_id: None,
+            op_name: "session".into(),
+            session_id: "s-1".into(),
+            attributes: Map::new(),
+        };
+        let serialized = serde_json::to_string(&ev).unwrap();
+        assert!(serialized.contains("\"type\":\"span_started\""));
+        let parsed: TelemetryEvent = serde_json::from_str(&serialized).unwrap();
+        match parsed {
+            TelemetryEvent::SpanStarted {
+                trace_id, span_id, ..
+            } => {
+                assert_eq!(trace_id, tid);
+                assert_eq!(span_id, sid);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let end = TelemetryEvent::SpanEnded {
+            span_id: sid,
+            status: "ok".into(),
+            duration_ms: 42,
+            attributes: Map::new(),
+        };
+        let s2 = serde_json::to_string(&end).unwrap();
+        assert!(s2.contains("\"type\":\"span_ended\""));
     }
 }
