@@ -1,3 +1,4 @@
+pub mod backpressure;
 mod client;
 mod error;
 mod http_client;
@@ -31,6 +32,8 @@ pub use types::{
     MessageResponse, MessageStartEvent, MessageStopEvent, OutputContentBlock, StreamEvent,
     ToolChoice, ToolDefinition, ToolResultContentBlock, Usage,
 };
+
+pub use backpressure::{BackpressureHint, BackpressureState};
 
 pub use telemetry::{
     AnalyticsEvent, AnthropicRequestProfile, ClientIdentity, JsonlTelemetrySink,
