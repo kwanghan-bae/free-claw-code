@@ -1,3 +1,6 @@
+pub mod traceparent;
+pub use traceparent::{SpanId, TraceContext, TraceId};
+
 use std::fmt::{Debug, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
