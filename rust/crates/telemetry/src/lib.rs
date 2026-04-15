@@ -426,6 +426,103 @@ impl SessionTracer {
     }
 }
 
+pub struct SpanGuard {
+    sink: Arc<dyn TelemetrySink>,
+    span_id: SpanId,
+    context: TraceContext,
+    started_at: std::time::Instant,
+    status: Mutex<Option<String>>,
+    attributes_on_end: Mutex<Map<String, Value>>,
+}
+
+impl SpanGuard {
+    #[must_use]
+    pub fn context(&self) -> TraceContext {
+        self.context
+    }
+    pub fn set_status(&self, status: impl Into<String>) {
+        *self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status.into());
+    }
+    pub fn add_attribute(&self, key: impl Into<String>, value: Value) {
+        self.attributes_on_end
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.into(), value);
+    }
+}
+
+impl Drop for SpanGuard {
+    fn drop(&mut self) {
+        let duration_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let status = self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| "ok".into());
+        let attributes = self
+            .attributes_on_end
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        self.sink.record(TelemetryEvent::SpanEnded {
+            span_id: self.span_id,
+            status,
+            duration_ms,
+            attributes,
+        });
+    }
+}
+
+impl SessionTracer {
+    pub fn start_span(
+        &self,
+        parent: TraceContext,
+        op_name: impl Into<String>,
+        attributes: Map<String, Value>,
+    ) -> SpanGuard {
+        let span_id = SpanId::random();
+        let op_name = op_name.into();
+        self.sink.record(TelemetryEvent::SpanStarted {
+            trace_id: parent.trace_id,
+            span_id,
+            parent_span_id: Some(parent.span_id),
+            op_name,
+            session_id: self.session_id.clone(),
+            attributes,
+        });
+        SpanGuard {
+            sink: self.sink.clone(),
+            span_id,
+            context: TraceContext {
+                trace_id: parent.trace_id,
+                span_id,
+                sampled: parent.sampled,
+            },
+            started_at: std::time::Instant::now(),
+            status: Mutex::new(None),
+            attributes_on_end: Mutex::new(Map::new()),
+        }
+    }
+
+    pub fn start_root_span(
+        &self,
+        op_name: impl Into<String>,
+        attributes: Map<String, Value>,
+    ) -> (TraceContext, SpanGuard) {
+        let root = TraceContext {
+            trace_id: TraceId::random(),
+            span_id: SpanId::random(),
+            sampled: true,
+        };
+        let guard = self.start_span(root, op_name, attributes);
+        (guard.context(), guard)
+    }
+}
+
 fn merge_trace_fields(
     method: String,
     path: String,
@@ -542,6 +639,31 @@ mod tests {
         assert!(contents.contains("\"action\":\"turn_completed\""));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn span_guard_emits_ended_on_drop_with_duration() {
+        let sink = Arc::new(MemoryTelemetrySink::default());
+        let tracer = SessionTracer::new("s-span", sink.clone());
+        let parent_ctx = TraceContext {
+            trace_id: TraceId::random(),
+            span_id: SpanId::random(),
+            sampled: true,
+        };
+        {
+            let guard = tracer.start_span(parent_ctx, "tool_call", Map::new());
+            assert_eq!(guard.context().trace_id, parent_ctx.trace_id);
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        }
+        let events = sink.events();
+        let has_start = events.iter().any(
+            |e| matches!(e, TelemetryEvent::SpanStarted { op_name, .. } if op_name == "tool_call"),
+        );
+        let has_end = events.iter().any(
+            |e| matches!(e, TelemetryEvent::SpanEnded { duration_ms, .. } if *duration_ms >= 3),
+        );
+        assert!(has_start);
+        assert!(has_end);
     }
 
     #[test]
