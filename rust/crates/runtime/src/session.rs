@@ -4,6 +4,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::json::{JsonError, JsonValue};
@@ -78,6 +79,19 @@ struct SessionPersistence {
     path: PathBuf,
 }
 
+/// RAII wrapper around a telemetry [`SpanGuard`](telemetry::SpanGuard) that can
+/// be shared via `Arc`, enabling `Clone` on [`Session`] without emitting
+/// duplicate span events. The span ends when the last clone drops.
+#[derive(Clone)]
+#[allow(dead_code)] // RAII guard — held for Drop side-effect, never read
+struct RootSpanGuard(Arc<telemetry::SpanGuard>);
+
+impl std::fmt::Debug for RootSpanGuard {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RootSpanGuard(..)")
+    }
+}
+
 /// Persisted conversational state for the runtime and CLI session manager.
 ///
 /// `workspace_root` binds the session to the worktree it was created in. The
@@ -102,6 +116,13 @@ pub struct Session {
     /// Timestamp of last successful health check (ROADMAP #38)
     pub last_health_check_ms: Option<u64>,
     pub model: Option<String>,
+    /// Propagation context for the root trace span, set when a
+    /// [`telemetry::SessionTracer`] is wired in via [`Session::with_tracer`].
+    pub trace_context: Option<telemetry::TraceContext>,
+    /// RAII guard that ends the root span when the session (and all its
+    /// clones) are dropped. Underscore-prefixed because it is intentionally
+    /// never read — its only purpose is to control the span lifetime.
+    _root_span_guard: Option<RootSpanGuard>,
     persistence: Option<SessionPersistence>,
 }
 
@@ -170,8 +191,28 @@ impl Session {
             prompt_history: Vec::new(),
             last_health_check_ms: None,
             model: None,
+            trace_context: None,
+            _root_span_guard: None,
             persistence: None,
         }
+    }
+
+    /// Wire a [`telemetry::SessionTracer`] into this session, opening a root
+    /// span whose lifetime is tied to this `Session` (and any clones that
+    /// share the underlying `Arc`).
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn with_tracer(mut self, tracer: &telemetry::SessionTracer) -> Self {
+        let (ctx, guard) = tracer.start_root_span(
+            "session",
+            serde_json::Map::from_iter([(
+                "session_id".into(),
+                serde_json::Value::String(self.session_id.clone()),
+            )]),
+        );
+        self.trace_context = Some(ctx);
+        self._root_span_guard = Some(RootSpanGuard(Arc::new(guard)));
+        self
     }
 
     #[must_use]
@@ -274,6 +315,8 @@ impl Session {
             prompt_history: self.prompt_history.clone(),
             last_health_check_ms: self.last_health_check_ms,
             model: self.model.clone(),
+            trace_context: None,
+            _root_span_guard: None,
             persistence: None,
         }
     }
@@ -398,6 +441,8 @@ impl Session {
             prompt_history,
             last_health_check_ms: None,
             model,
+            trace_context: None,
+            _root_span_guard: None,
             persistence: None,
         })
     }
@@ -499,6 +544,8 @@ impl Session {
             prompt_history,
             last_health_check_ms: None,
             model,
+            trace_context: None,
+            _root_span_guard: None,
             persistence: None,
         })
     }
