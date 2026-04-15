@@ -95,6 +95,7 @@ pub struct OpenAiCompatClient {
     initial_backoff: Duration,
     max_backoff: Duration,
     trace_context: Option<TraceContext>,
+    hints: Option<String>,
 }
 
 impl OpenAiCompatClient {
@@ -117,6 +118,7 @@ impl OpenAiCompatClient {
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
             max_backoff: DEFAULT_MAX_BACKOFF,
             trace_context: None,
+            hints: None,
         }
     }
 
@@ -152,6 +154,12 @@ impl OpenAiCompatClient {
     #[must_use]
     pub fn with_trace_context(mut self, ctx: TraceContext) -> Self {
         self.trace_context = Some(ctx);
+        self
+    }
+
+    #[must_use]
+    pub fn with_hints(mut self, hints: impl Into<String>) -> Self {
+        self.hints = Some(hints.into());
         self
     }
 
@@ -268,6 +276,9 @@ impl OpenAiCompatClient {
             .json(&build_chat_completion_request(request, self.config()));
         if let Some(ctx) = self.trace_context {
             req = req.header("traceparent", ctx.encode());
+        }
+        if let Some(hints) = self.hints.as_deref() {
+            req = req.header("x-free-claw-hints", hints);
         }
         req.send().await.map_err(ApiError::from)
     }

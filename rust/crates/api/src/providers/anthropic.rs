@@ -123,6 +123,7 @@ pub struct AnthropicClient {
     request_profile: AnthropicRequestProfile,
     session_tracer: Option<SessionTracer>,
     trace_context: Option<TraceContext>,
+    hints: Option<String>,
     prompt_cache: Option<PromptCache>,
     last_prompt_cache_record: Arc<Mutex<Option<PromptCacheRecord>>>,
 }
@@ -140,6 +141,7 @@ impl AnthropicClient {
             request_profile: AnthropicRequestProfile::default(),
             session_tracer: None,
             trace_context: None,
+            hints: None,
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
         }
@@ -157,6 +159,7 @@ impl AnthropicClient {
             request_profile: AnthropicRequestProfile::default(),
             session_tracer: None,
             trace_context: None,
+            hints: None,
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
         }
@@ -225,6 +228,12 @@ impl AnthropicClient {
     #[must_use]
     pub fn with_trace_context(mut self, ctx: TraceContext) -> Self {
         self.trace_context = Some(ctx);
+        self
+    }
+
+    #[must_use]
+    pub fn with_hints(mut self, hints: impl Into<String>) -> Self {
+        self.hints = Some(hints.into());
         self
     }
 
@@ -496,6 +505,9 @@ impl AnthropicClient {
         }
         if let Some(ctx) = self.trace_context {
             request_builder = request_builder.header("traceparent", ctx.encode());
+        }
+        if let Some(hints) = self.hints.as_deref() {
+            request_builder = request_builder.header("x-free-claw-hints", hints);
         }
         request_builder
     }

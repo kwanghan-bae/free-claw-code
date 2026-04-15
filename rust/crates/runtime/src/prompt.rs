@@ -517,6 +517,75 @@ fn get_actions_section() -> String {
     .join("\n")
 }
 
+/// Classify the latest user message into a task-hint category.
+///
+/// The returned label is attached to outbound API requests as the
+/// `x-free-claw-hints` header so the upstream router can make
+/// scheduling and model-selection decisions.
+#[must_use]
+pub fn classify_task_hint(user_message: &str) -> &'static str {
+    const PLANNING: &[&str] = &["design", "architect", "plan", "approach", "strategy"];
+    const CODING: &[&str] = &[
+        "refactor",
+        "implement",
+        "fix",
+        "bug",
+        "unit test",
+        "integration test",
+        "add function",
+        "add method",
+        "write tests",
+        "patch",
+    ];
+    const TOOL_HEAVY: &[&str] = &["run", "execute", "search", "grep", "shell"];
+    const SUMMARY: &[&str] = &["summarize", "summary", "tl;dr", "condense"];
+
+    let lower = user_message.to_lowercase();
+
+    if PLANNING.iter().any(|k| lower.contains(k)) {
+        return "planning";
+    }
+    if TOOL_HEAVY.iter().any(|k| lower.contains(k)) {
+        return "tool_heavy";
+    }
+    if CODING.iter().any(|k| lower.contains(k)) {
+        return "coding";
+    }
+    if SUMMARY.iter().any(|k| lower.contains(k)) {
+        return "summary";
+    }
+    "chat"
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+
+    #[test]
+    fn classify_coding_request() {
+        assert_eq!(classify_task_hint("refactor this module"), "coding");
+        assert_eq!(classify_task_hint("add unit tests for auth"), "coding");
+    }
+
+    #[test]
+    fn classify_planning_request() {
+        assert_eq!(classify_task_hint("design a rate limiter"), "planning");
+    }
+
+    #[test]
+    fn classify_summary_request() {
+        assert_eq!(
+            classify_task_hint("summarize the PR description"),
+            "summary"
+        );
+    }
+
+    #[test]
+    fn classify_default_chat() {
+        assert_eq!(classify_task_hint("hello"), "chat");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
