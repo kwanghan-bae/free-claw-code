@@ -17,6 +17,8 @@ from router.learning.nudge_cache import NudgeCache, ConversationBuffer
 from router.learning.rule_detector import RuleDetector
 from router.learning.nudge_injector import NudgeInjector
 from router.learning.batch_analyzer import BatchAnalyzer
+from router.learning.insight_generator import InsightGenerator
+from router.learning.trajectory_compressor import TrajectoryCompressor
 from router.dispatch.client import DispatchClient
 
 DEFAULT_DB = Path.home() / ".free-claw-router" / "telemetry.db"
@@ -88,6 +90,43 @@ async def lifespan(app: FastAPI):
         return result.body.get("choices", [{}])[0].get("message", {}).get("content", "")
 
     batch_analyzer = BatchAnalyzer(llm_fn=_batch_llm)
+
+    # Insight + trajectory hooks (P3, fire on session-close mining)
+    import os
+
+    def _search_mempalace(query, wing=None, n_results=5):
+        from mempalace.searcher import search_memories
+        return search_memories(query, palace_path=os.path.expanduser("~/.mempalace/palace"),
+                               wing=wing, n_results=n_results)
+
+    def _add_mempalace_drawer(wing, room, content):
+        from mempalace.mcp_server import tool_add_drawer
+        tool_add_drawer(wing=wing, room=room, content=content)
+
+    insight_gen = InsightGenerator(
+        search_fn=_search_mempalace, llm_fn=_batch_llm, add_drawer_fn=_add_mempalace_drawer,
+    )
+    traj_comp = TrajectoryCompressor(llm_fn=_batch_llm, add_drawer_fn=_add_mempalace_drawer)
+
+    def _insight_hook(trace_id, transcript, wing):
+        import asyncio
+        try:
+            asyncio.run(insight_gen.generate(project_wing=wing))
+        except RuntimeError:
+            # Event loop already running — use create_task instead
+            loop = asyncio.get_event_loop()
+            loop.create_task(insight_gen.generate(project_wing=wing))
+
+    def _trajectory_hook(trace_id, transcript, wing):
+        import asyncio
+        try:
+            asyncio.run(traj_comp.compress(trace_id=trace_id, transcript=transcript, project_wing=wing))
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            loop.create_task(traj_comp.compress(trace_id=trace_id, transcript=transcript, project_wing=wing))
+
+    session_detector._on_mine_hooks.append(_insight_hook)
+    session_detector._on_mine_hooks.append(_trajectory_hook)
 
     from apscheduler.schedulers.background import BackgroundScheduler
     bg_scheduler = BackgroundScheduler()
