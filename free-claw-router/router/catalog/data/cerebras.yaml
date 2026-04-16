@@ -1,0 +1,29 @@
+provider_id: cerebras
+base_url: https://api.cerebras.ai/v1
+auth: {env: CEREBRAS_API_KEY, scheme: bearer}
+known_ratelimit_header_schema: generic
+models:
+  - model_id: llama-3.3-70b
+    status: active
+    context_window: 8192
+    tool_use: true
+    structured_output: partial
+    free_tier: {rpm: 30, tpm: 14400, daily: 14400, reset_policy: minute}
+    pricing: {input: 0, output: 0, free: true}
+    quirks:
+      - "ultra-low latency; partial streaming stricter than OpenAI"
+    evidence_urls:
+      - https://inference-docs.cerebras.ai/models
+    last_verified: "2026-04-15T00:00:00Z"
+    first_seen: "2026-03-05"
+  - model_id: qwen-coder-32b-instruct
+    status: active
+    context_window: 32768
+    tool_use: true
+    structured_output: partial
+    free_tier: {rpm: 30, tpm: 14400, daily: 14400, reset_policy: minute}
+    pricing: {input: 0, output: 0, free: true}
+    quirks: []
+    evidence_urls: [https://inference-docs.cerebras.ai/models]
+    last_verified: "2026-04-15T00:00:00Z"
+    first_seen: "2026-03-25"

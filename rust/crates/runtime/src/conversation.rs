@@ -23,6 +23,13 @@ const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_
 pub struct ApiRequest {
     pub system_prompt: Vec<String>,
     pub messages: Vec<ConversationMessage>,
+    /// Task-hint label classified from the latest user message (e.g. `"coding"`,
+    /// `"planning"`). Passed through to the provider client so it can be emitted
+    /// as the `x-free-claw-hints` header.
+    pub task_hint: Option<String>,
+    /// Propagation context for the W3C `traceparent` header, forwarded from
+    /// the session so the provider client can emit it on the wire.
+    pub trace_context: Option<telemetry::TraceContext>,
 }
 
 /// Streamed events emitted while processing a single assistant turn.
@@ -317,6 +324,7 @@ where
         mut prompter: Option<&mut dyn PermissionPrompter>,
     ) -> Result<TurnSummary, RuntimeError> {
         let user_input = user_input.into();
+        let task_hint = crate::prompt::classify_task_hint(&user_input).to_string();
 
         // ROADMAP #38: Session-health canary - probe if context was compacted
         if self.session.compaction.is_some() {
@@ -352,6 +360,8 @@ where
             let request = ApiRequest {
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
+                task_hint: Some(task_hint.clone()),
+                trace_context: self.session.trace_context,
             };
             let events = match self.api_client.stream(request) {
                 Ok(events) => events,

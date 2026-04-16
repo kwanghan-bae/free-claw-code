@@ -1,0 +1,25 @@
+name: catalog-refresh-verify
+on:
+  pull_request:
+    paths:
+      - "free-claw-router/router/catalog/data/**"
+      - "free-claw-router/router/catalog/schema.py"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Install deps
+        run: |
+          cd free-claw-router
+          uv sync --extra dev
+      - name: Schema + invariants
+        run: |
+          cd free-claw-router
+          uv run pytest tests/test_catalog_schema.py tests/test_catalog_registry.py tests/test_catalog_openrouter.py -v
+      - name: Routing snapshot tests
+        run: |
+          cd free-claw-router
+          uv run pytest tests/test_routing_decide.py -v

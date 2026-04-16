@@ -1,0 +1,33 @@
+provider_id: openrouter
+base_url: https://openrouter.ai/api/v1
+auth: {env: OPENROUTER_API_KEY, scheme: bearer}
+known_ratelimit_header_schema: openrouter_standard
+models:
+  - model_id: z-ai/glm-4.6:free
+    status: active
+    context_window: 131072
+    tool_use: true
+    structured_output: partial
+    free_tier: {rpm: 20, tpm: 100000, daily: null, reset_policy: minute}
+    pricing: {input: 0, output: 0, free: true}
+    quirks:
+      - "tool_calls field uses OpenAI v2 schema"
+      - "max stream chunk ~4KB; flush more often than every 2KB"
+    evidence_urls:
+      - https://openrouter.ai/models/z-ai/glm-4.6:free
+      - https://openrouter.ai/api/v1/models
+    last_verified: "2026-04-15T00:00:00Z"
+    first_seen: "2026-03-28"
+  - model_id: deepseek/deepseek-v3:free
+    status: active
+    context_window: 65536
+    tool_use: true
+    structured_output: partial
+    free_tier: {rpm: 20, tpm: 80000, daily: null, reset_policy: minute}
+    pricing: {input: 0, output: 0, free: true}
+    quirks: []
+    evidence_urls:
+      - https://openrouter.ai/models/deepseek/deepseek-v3:free
+      - https://openrouter.ai/api/v1/models
+    last_verified: "2026-04-15T00:00:00Z"
+    first_seen: "2026-03-15"

@@ -12,6 +12,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use telemetry::{AnalyticsEvent, AnthropicRequestProfile, ClientIdentity, SessionTracer};
 
+use telemetry::TraceContext;
+
 use crate::error::ApiError;
 use crate::http_client::build_http_client_or_default;
 use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
@@ -120,6 +122,8 @@ pub struct AnthropicClient {
     max_backoff: Duration,
     request_profile: AnthropicRequestProfile,
     session_tracer: Option<SessionTracer>,
+    trace_context: Option<TraceContext>,
+    hints: Option<String>,
     prompt_cache: Option<PromptCache>,
     last_prompt_cache_record: Arc<Mutex<Option<PromptCacheRecord>>>,
 }
@@ -136,6 +140,8 @@ impl AnthropicClient {
             max_backoff: DEFAULT_MAX_BACKOFF,
             request_profile: AnthropicRequestProfile::default(),
             session_tracer: None,
+            trace_context: None,
+            hints: None,
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
         }
@@ -152,6 +158,8 @@ impl AnthropicClient {
             max_backoff: DEFAULT_MAX_BACKOFF,
             request_profile: AnthropicRequestProfile::default(),
             session_tracer: None,
+            trace_context: None,
+            hints: None,
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
         }
@@ -215,6 +223,34 @@ impl AnthropicClient {
     pub fn with_session_tracer(mut self, session_tracer: SessionTracer) -> Self {
         self.session_tracer = Some(session_tracer);
         self
+    }
+
+    #[must_use]
+    pub fn with_trace_context(mut self, ctx: TraceContext) -> Self {
+        self.trace_context = Some(ctx);
+        self
+    }
+
+    #[must_use]
+    pub fn with_hints(mut self, hints: impl Into<String>) -> Self {
+        self.hints = Some(hints.into());
+        self
+    }
+
+    pub fn set_trace_context(&mut self, ctx: TraceContext) {
+        self.trace_context = Some(ctx);
+    }
+
+    pub fn clear_trace_context(&mut self) {
+        self.trace_context = None;
+    }
+
+    pub fn set_hints(&mut self, hints: impl Into<String>) {
+        self.hints = Some(hints.into());
+    }
+
+    pub fn clear_hints(&mut self) {
+        self.hints = None;
     }
 
     #[must_use]
@@ -482,6 +518,12 @@ impl AnthropicClient {
         let mut request_builder = self.auth.apply(request_builder);
         for (header_name, header_value) in self.request_profile.header_pairs() {
             request_builder = request_builder.header(header_name, header_value);
+        }
+        if let Some(ctx) = self.trace_context {
+            request_builder = request_builder.header("traceparent", ctx.encode());
+        }
+        if let Some(hints) = self.hints.as_deref() {
+            request_builder = request_builder.header("x-free-claw-hints", hints);
         }
         request_builder
     }

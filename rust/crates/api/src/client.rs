@@ -56,6 +56,54 @@ impl ProviderClient {
     }
 
     #[must_use]
+    pub fn with_trace_context(self, ctx: telemetry::TraceContext) -> Self {
+        match self {
+            Self::Anthropic(client) => Self::Anthropic(client.with_trace_context(ctx)),
+            Self::Xai(client) => Self::Xai(client.with_trace_context(ctx)),
+            Self::OpenAi(client) => Self::OpenAi(client.with_trace_context(ctx)),
+        }
+    }
+
+    #[must_use]
+    pub fn with_hints(self, hints: impl Into<String>) -> Self {
+        let hints = hints.into();
+        match self {
+            Self::Anthropic(client) => Self::Anthropic(client.with_hints(hints)),
+            Self::Xai(client) => Self::Xai(client.with_hints(hints)),
+            Self::OpenAi(client) => Self::OpenAi(client.with_hints(hints)),
+        }
+    }
+
+    pub fn set_trace_context(&mut self, ctx: telemetry::TraceContext) {
+        match self {
+            ProviderClient::Anthropic(c) => c.set_trace_context(ctx),
+            ProviderClient::Xai(c) | ProviderClient::OpenAi(c) => c.set_trace_context(ctx),
+        }
+    }
+
+    pub fn clear_trace_context(&mut self) {
+        match self {
+            ProviderClient::Anthropic(c) => c.clear_trace_context(),
+            ProviderClient::Xai(c) | ProviderClient::OpenAi(c) => c.clear_trace_context(),
+        }
+    }
+
+    pub fn set_hints(&mut self, hints: impl Into<String>) {
+        let hints = hints.into();
+        match self {
+            ProviderClient::Anthropic(c) => c.set_hints(hints),
+            ProviderClient::Xai(c) | ProviderClient::OpenAi(c) => c.set_hints(hints),
+        }
+    }
+
+    pub fn clear_hints(&mut self) {
+        match self {
+            ProviderClient::Anthropic(c) => c.clear_hints(),
+            ProviderClient::Xai(c) | ProviderClient::OpenAi(c) => c.clear_hints(),
+        }
+    }
+
+    #[must_use]
     pub fn with_prompt_cache(self, prompt_cache: PromptCache) -> Self {
         match self {
             Self::Anthropic(client) => Self::Anthropic(client.with_prompt_cache(prompt_cache)),

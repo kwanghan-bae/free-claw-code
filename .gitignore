@@ -10,3 +10,11 @@ archive/
 .claw/sessions/
 .clawhip/
 status-help.txt
+
+# free-claw-router sidecar
+/tmp/free-claw-router-worktrees/
+free-claw-router/.venv/
+free-claw-router/.pytest_cache/
+free-claw-router/**/__pycache__/
+free-claw-router/router/telemetry/*.db
+free-claw-router/router/telemetry/*.db-*

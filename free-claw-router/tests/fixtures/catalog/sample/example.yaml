@@ -1,0 +1,16 @@
+provider_id: example
+base_url: https://example.com/v1
+auth: {env: EXAMPLE_KEY, scheme: bearer}
+known_ratelimit_header_schema: generic
+models:
+  - model_id: example/m1:free
+    status: active
+    context_window: 8192
+    tool_use: false
+    structured_output: none
+    free_tier: {rpm: 10, tpm: 5000, daily: null, reset_policy: minute}
+    pricing: {input: 0, output: 0, free: true}
+    quirks: []
+    evidence_urls: [https://example.com/models/m1]
+    last_verified: "2026-04-15T00:00:00Z"
+    first_seen: "2026-04-15"

@@ -1,3 +1,6 @@
+pub mod traceparent;
+pub use traceparent::{SpanId, TraceContext, TraceId};
+
 use std::fmt::{Debug, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -200,6 +203,23 @@ pub enum TelemetryEvent {
     },
     Analytics(AnalyticsEvent),
     SessionTrace(SessionTraceRecord),
+    SpanStarted {
+        trace_id: TraceId,
+        span_id: SpanId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_span_id: Option<SpanId>,
+        op_name: String,
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        attributes: Map<String, Value>,
+    },
+    SpanEnded {
+        span_id: SpanId,
+        status: String,
+        duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        attributes: Map<String, Value>,
+    },
 }
 
 pub trait TelemetrySink: Send + Sync {
@@ -406,6 +426,103 @@ impl SessionTracer {
     }
 }
 
+pub struct SpanGuard {
+    sink: Arc<dyn TelemetrySink>,
+    span_id: SpanId,
+    context: TraceContext,
+    started_at: std::time::Instant,
+    status: Mutex<Option<String>>,
+    attributes_on_end: Mutex<Map<String, Value>>,
+}
+
+impl SpanGuard {
+    #[must_use]
+    pub fn context(&self) -> TraceContext {
+        self.context
+    }
+    pub fn set_status(&self, status: impl Into<String>) {
+        *self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status.into());
+    }
+    pub fn add_attribute(&self, key: impl Into<String>, value: Value) {
+        self.attributes_on_end
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.into(), value);
+    }
+}
+
+impl Drop for SpanGuard {
+    fn drop(&mut self) {
+        let duration_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let status = self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| "ok".into());
+        let attributes = self
+            .attributes_on_end
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        self.sink.record(TelemetryEvent::SpanEnded {
+            span_id: self.span_id,
+            status,
+            duration_ms,
+            attributes,
+        });
+    }
+}
+
+impl SessionTracer {
+    pub fn start_span(
+        &self,
+        parent: TraceContext,
+        op_name: impl Into<String>,
+        attributes: Map<String, Value>,
+    ) -> SpanGuard {
+        let span_id = SpanId::random();
+        let op_name = op_name.into();
+        self.sink.record(TelemetryEvent::SpanStarted {
+            trace_id: parent.trace_id,
+            span_id,
+            parent_span_id: Some(parent.span_id),
+            op_name,
+            session_id: self.session_id.clone(),
+            attributes,
+        });
+        SpanGuard {
+            sink: self.sink.clone(),
+            span_id,
+            context: TraceContext {
+                trace_id: parent.trace_id,
+                span_id,
+                sampled: parent.sampled,
+            },
+            started_at: std::time::Instant::now(),
+            status: Mutex::new(None),
+            attributes_on_end: Mutex::new(Map::new()),
+        }
+    }
+
+    pub fn start_root_span(
+        &self,
+        op_name: impl Into<String>,
+        attributes: Map<String, Value>,
+    ) -> (TraceContext, SpanGuard) {
+        let root = TraceContext {
+            trace_id: TraceId::random(),
+            span_id: SpanId::random(),
+            sampled: true,
+        };
+        let guard = self.start_span(root, op_name, attributes);
+        (guard.context(), guard)
+    }
+}
+
 fn merge_trace_fields(
     method: String,
     path: String,
@@ -522,5 +639,82 @@ mod tests {
         assert!(contents.contains("\"action\":\"turn_completed\""));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn span_guard_emits_ended_on_drop_with_duration() {
+        let sink = Arc::new(MemoryTelemetrySink::default());
+        let tracer = SessionTracer::new("s-span", sink.clone());
+        let parent_ctx = TraceContext {
+            trace_id: TraceId::random(),
+            span_id: SpanId::random(),
+            sampled: true,
+        };
+        {
+            let guard = tracer.start_span(parent_ctx, "tool_call", Map::new());
+            assert_eq!(guard.context().trace_id, parent_ctx.trace_id);
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        }
+        let events = sink.events();
+        let has_start = events.iter().any(
+            |e| matches!(e, TelemetryEvent::SpanStarted { op_name, .. } if op_name == "tool_call"),
+        );
+        let has_end = events.iter().any(
+            |e| matches!(e, TelemetryEvent::SpanEnded { duration_ms, .. } if *duration_ms >= 3),
+        );
+        assert!(has_start);
+        assert!(has_end);
+    }
+
+    #[test]
+    fn span_started_and_ended_events_serialize_roundtrip() {
+        let tid = TraceId([
+            0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e,
+            0x47, 0x36,
+        ]);
+        let sid = SpanId([0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7]);
+        let ev = TelemetryEvent::SpanStarted {
+            trace_id: tid,
+            span_id: sid,
+            parent_span_id: None,
+            op_name: "session".into(),
+            session_id: "s-1".into(),
+            attributes: Map::new(),
+        };
+        let serialized = serde_json::to_string(&ev).unwrap();
+        assert!(serialized.contains("\"type\":\"span_started\""));
+        let parsed: TelemetryEvent = serde_json::from_str(&serialized).unwrap();
+        match parsed {
+            TelemetryEvent::SpanStarted {
+                trace_id, span_id, ..
+            } => {
+                assert_eq!(trace_id, tid);
+                assert_eq!(span_id, sid);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let end = TelemetryEvent::SpanEnded {
+            span_id: sid,
+            status: "ok".into(),
+            duration_ms: 42,
+            attributes: Map::new(),
+        };
+        let s2 = serde_json::to_string(&end).unwrap();
+        assert!(s2.contains("\"type\":\"span_ended\""));
+        let parsed_end: TelemetryEvent = serde_json::from_str(&s2).unwrap();
+        match parsed_end {
+            TelemetryEvent::SpanEnded {
+                span_id,
+                status,
+                duration_ms,
+                ..
+            } => {
+                assert_eq!(span_id, sid);
+                assert_eq!(status, "ok");
+                assert_eq!(duration_ms, 42);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }
