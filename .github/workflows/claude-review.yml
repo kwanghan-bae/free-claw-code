@@ -1,0 +1,54 @@
+name: claude-review
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - "free-claw-router/router/catalog/data/**"
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Extract PR diff
+        id: diff
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD -- free-claw-router/router/catalog/data/ > /tmp/pr.diff
+          echo "diff_size=$(wc -c < /tmp/pr.diff)" >> $GITHUB_OUTPUT
+      - name: Run Claude review
+        if: steps.diff.outputs.diff_size != '0'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import os, json, pathlib, urllib.request
+          prompt = pathlib.Path("free-claw-router/ops/claude-review-prompt.md").read_text()
+          diff = pathlib.Path("/tmp/pr.diff").read_text()[:8000]
+          body = {
+              "model": "claude-sonnet-4-5-20241022",
+              "max_tokens": 1600,
+              "system": prompt,
+              "messages": [{"role": "user", "content": f"PR diff:\n```\n{diff}\n```"}],
+          }
+          req = urllib.request.Request(
+              "https://api.anthropic.com/v1/messages",
+              method="POST",
+              data=json.dumps(body).encode(),
+              headers={
+                  "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+                  "anthropic-version": "2023-06-01",
+                  "content-type": "application/json",
+              },
+          )
+          resp = json.loads(urllib.request.urlopen(req).read())
+          text = "".join(b.get("text", "") for b in resp.get("content", []))
+          pathlib.Path("/tmp/review.md").write_text(text)
+          PY
+          gh pr comment ${{ github.event.pull_request.number }} --body-file /tmp/review.md
