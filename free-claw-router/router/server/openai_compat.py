@@ -186,3 +186,24 @@ async def chat_completions(request: Request) -> JSONResponse:
         if k in result.response_headers:
             resp.headers[k] = result.response_headers[k]
     return resp
+
+
+from fastapi import Body
+from router.catalog.refresh.scheduler import CronScheduler, CronJob
+
+_cron = CronScheduler()
+
+@app.post("/cron/register")
+async def cron_register(body: dict = Body(...)) -> JSONResponse:
+    try:
+        job = CronJob(job_id=body["job_id"], cron_expr=body["cron_expr"], payload=body.get("payload", {}))
+        _cron.register(job)
+        return JSONResponse({"ok": True, "job_id": job.job_id})
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
+    except KeyError as e:
+        return JSONResponse({"ok": False, "error": f"missing: {e}"}, status_code=422)
+
+@app.get("/cron/list")
+async def cron_list() -> JSONResponse:
+    return JSONResponse({"jobs": [{"job_id": j.job_id, "cron_expr": j.cron_expr, "payload": j.payload} for j in _cron.list_jobs()]})
