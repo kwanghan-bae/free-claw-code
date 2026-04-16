@@ -8,6 +8,9 @@ from router.routing.hints import classify_task_hint
 from router.routing.decide import build_fallback_chain
 from router.dispatch.client import DispatchClient, DispatchResult
 from router.dispatch.fallback import run_fallback_chain
+from router.quota.bucket import BucketStore
+from router.quota.predict import estimate_request_tokens
+from router.adapters.hermes_ratelimit import RateLimitState
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "catalog" / "data"
 POLICY_PATH = Path(__file__).resolve().parent.parent / "routing" / "policy.yaml"
@@ -17,6 +20,7 @@ app = FastAPI(title="free-claw-router", lifespan=lifespan)
 _registry: Registry | None = None
 _policy: Policy | None = None
 _dispatch = DispatchClient()
+_bucket_store = BucketStore()
 
 def _ensure_loaded() -> tuple[Registry, Policy]:
     global _registry, _policy
@@ -50,9 +54,26 @@ async def chat_completions(request: Request) -> JSONResponse:
     if not chain:
         raise HTTPException(status_code=503, detail=f"no candidates for task_type={hint}")
 
+    estimated = estimate_request_tokens(payload)
+
     async def call_one(cand):
         provider = next(p for p in registry.providers if p.provider_id == cand.provider_id)
-        return await _dispatch.call(provider, cand.model, payload, dict(request.headers))
+        bucket = _bucket_store.get(
+            cand.provider_id, cand.model_id,
+            rpm_limit=cand.model.free_tier.rpm,
+            tpm_limit=cand.model.free_tier.tpm,
+            daily_limit=cand.model.free_tier.daily,
+        )
+        try:
+            tok = await bucket.reserve(tokens_estimated=estimated)
+        except RuntimeError:
+            return DispatchResult(429, {"error": "quota_exhausted"}, RateLimitState(), {})
+        result = await _dispatch.call(provider, cand.model, payload, dict(request.headers))
+        if result.status == 200:
+            await bucket.commit(tok, tokens_actual=estimated)
+        else:
+            await bucket.rollback(tok)
+        return result
 
     result = await run_fallback_chain(chain, call_one)
     resp = JSONResponse(status_code=result.status, content=result.body)
