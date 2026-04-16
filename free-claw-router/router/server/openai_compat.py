@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import time as _time
 import time
 import secrets
 from fastapi import FastAPI, Request, HTTPException
@@ -27,6 +28,18 @@ _policy: Policy | None = None
 _dispatch = DispatchClient()
 _bucket_store = BucketStore()
 _telemetry_store: Store | None = None
+
+
+class _RequestGapTracker:
+    def __init__(self):
+        self._last_ts: dict[str, float] = {}
+    def get_gap(self, trace_id: str) -> float:
+        now = _time.time()
+        last = self._last_ts.get(trace_id, now)
+        self._last_ts[trace_id] = now
+        return now - last
+
+_request_gap_tracker = _RequestGapTracker()
 
 def _resolve_store() -> Store | None:
     return _telemetry_store or getattr(app.state, 'telemetry_store', None)
@@ -76,6 +89,17 @@ async def chat_completions(request: Request) -> JSONResponse:
             )
         except Exception:
             pass
+
+    # Memory injection (P1)
+    injector = getattr(app.state, "injector", None)
+    if injector is not None:
+        _workspace = request.headers.get("x-free-claw-workspace")
+        _trace_hex = trace_id.hex() if trace_id else ""
+        _gap = _request_gap_tracker.get_gap(_trace_hex)
+        payload = injector.maybe_inject(
+            payload, trace_id=_trace_hex, workspace=_workspace,
+            last_request_gap_seconds=_gap,
+        )
 
     hint = request.headers.get("x-free-claw-hints")
     if not hint:
