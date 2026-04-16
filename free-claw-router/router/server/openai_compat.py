@@ -91,14 +91,22 @@ async def chat_completions(request: Request) -> JSONResponse:
             pass
 
     # Memory injection (P1)
+    _trace_hex = trace_id.hex() if trace_id else ""
     injector = getattr(app.state, "injector", None)
     if injector is not None:
         _workspace = request.headers.get("x-free-claw-workspace")
-        _trace_hex = trace_id.hex() if trace_id else ""
         _gap = _request_gap_tracker.get_gap(_trace_hex)
         payload = injector.maybe_inject(
             payload, trace_id=_trace_hex, workspace=_workspace,
             last_request_gap_seconds=_gap,
+        )
+
+    # Record activity for session-close detection
+    detector = getattr(app.state, "session_detector", None)
+    if detector is not None:
+        detector.record_activity(
+            trace_id=_trace_hex,
+            workspace=request.headers.get("x-free-claw-workspace", ""),
         )
 
     hint = request.headers.get("x-free-claw-hints")
