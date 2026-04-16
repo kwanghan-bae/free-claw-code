@@ -25,6 +25,7 @@ class SessionCloseDetector:
         transcript_fn: Callable[[str], str],  # (trace_id) -> transcript text
         wakeup_invalidate_fn: Callable[[str], None],
         wing_resolve_fn: Callable[[str], str],  # workspace -> wing
+        on_mine_hooks: list[Callable] | None = None,
     ) -> None:
         self._close_timeout = close_timeout_seconds
         self._idle_threshold = idle_threshold_seconds
@@ -32,6 +33,7 @@ class SessionCloseDetector:
         self._transcript_fn = transcript_fn
         self._wakeup_invalidate = wakeup_invalidate_fn
         self._wing_resolve = wing_resolve_fn
+        self._on_mine_hooks = on_mine_hooks or []
         self._sessions: dict[str, _SessionState] = {}
 
     def record_activity(self, trace_id: str, workspace: str) -> None:
@@ -67,5 +69,10 @@ class SessionCloseDetector:
             wing = self._wing_resolve(state.workspace)
             self._miner.mine_session(transcript, project_wing=wing)
             logger.info("mined session %s (reason=%s, wing=%s)", trace_id[:8], reason, wing)
+            for hook in self._on_mine_hooks:
+                try:
+                    hook(trace_id, transcript, wing)
+                except Exception:
+                    logger.warning("mine hook failed", exc_info=True)
         except Exception:
             logger.warning("mining failed for %s", trace_id[:8], exc_info=True)
