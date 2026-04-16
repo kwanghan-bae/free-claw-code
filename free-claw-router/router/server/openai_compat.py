@@ -23,7 +23,6 @@ POLICY_PATH = Path(__file__).resolve().parent.parent / "routing" / "policy.yaml"
 
 app = FastAPI(title="free-claw-router", lifespan=lifespan)
 
-_registry: Registry | None = None
 _policy: Policy | None = None
 _dispatch = DispatchClient()
 _bucket_store = BucketStore()
@@ -33,12 +32,17 @@ def _resolve_store() -> Store | None:
     return _telemetry_store or getattr(app.state, 'telemetry_store', None)
 
 def _ensure_loaded() -> tuple[Registry, Policy]:
-    global _registry, _policy
-    if _registry is None:
-        _registry = Registry.load_from_dir(DATA_DIR)
+    global _policy
+    live = getattr(app.state, "catalog_live", None)
+    if live:
+        registry = live.snapshot()
+    else:
+        if not hasattr(_ensure_loaded, "_fallback"):
+            _ensure_loaded._fallback = Registry.load_from_dir(DATA_DIR)
+        registry = _ensure_loaded._fallback
     if _policy is None:
         _policy = Policy.load(POLICY_PATH)
-    return _registry, _policy
+    return registry, _policy
 
 @app.get("/health")
 async def health(request: Request) -> JSONResponse:
