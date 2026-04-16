@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from router.server.openai_compat import app, _dispatch
 from router.dispatch.client import DispatchResult
+from router.adapters.hermes_ratelimit import RateLimitState
 
 @pytest.fixture
 def client():
@@ -13,6 +14,7 @@ def test_chat_completions_dispatches_via_fallback_chain(client, monkeypatch):
         return DispatchResult(
             200,
             {"id": "x", "choices": [{"message": {"role": "assistant", "content": "hi"}}]},
+            RateLimitState(),
             {},
         )
     monkeypatch.setattr(_dispatch, "call", fake_call)
@@ -28,7 +30,7 @@ def test_chat_completions_dispatches_via_fallback_chain(client, monkeypatch):
 def test_503_when_unknown_task_type(client, monkeypatch):
     # Mock dispatch so we don't hit real networks
     async def fake_call(*a, **kw):
-        return DispatchResult(200, {}, {})
+        return DispatchResult(200, {}, RateLimitState(), {})
     monkeypatch.setattr(_dispatch, "call", fake_call)
 
     r = client.post(

@@ -1,13 +1,15 @@
 from __future__ import annotations
-import os
 from dataclasses import dataclass
 import httpx
 from router.catalog.schema import ProviderSpec, ModelSpec
+from router.adapters.hermes_credentials import resolve_api_key
+from router.adapters.hermes_ratelimit import parse_rate_limit_headers, RateLimitState
 
 @dataclass
 class DispatchResult:
     status: int
     body: dict
+    rate_limit_state: RateLimitState
     response_headers: dict[str, str]
 
 class DispatchClient:
@@ -22,7 +24,7 @@ class DispatchClient:
     ) -> DispatchResult:
         headers: dict[str, str] = {}
         if provider.auth.scheme == "bearer":
-            key = os.environ.get(provider.auth.env, "")
+            key = resolve_api_key(provider.auth.env)
             if key:
                 headers["Authorization"] = f"Bearer {key}"
         for h in ("traceparent", "x-free-claw-hints"):
@@ -44,5 +46,6 @@ class DispatchClient:
         return DispatchResult(
             status=resp.status_code,
             body=resp_body,
+            rate_limit_state=parse_rate_limit_headers(resp_headers),
             response_headers=resp_headers,
         )
