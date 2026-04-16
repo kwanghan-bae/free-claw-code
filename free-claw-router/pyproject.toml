@@ -12,6 +12,7 @@ dependencies = [
   "anyio>=4.3",
   "watchdog>=4.0",
   "apscheduler>=3.10",
+  "mempalace>=3.3.0",
 ]
 
 [project.optional-dependencies]
