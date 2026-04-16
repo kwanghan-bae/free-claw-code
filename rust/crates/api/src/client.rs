@@ -104,6 +104,31 @@ impl ProviderClient {
     }
 
     #[must_use]
+    pub fn with_workspace(self, ws: impl Into<String>) -> Self {
+        let ws = ws.into();
+        match self {
+            Self::Anthropic(client) => Self::Anthropic(client.with_workspace(ws)),
+            Self::Xai(client) => Self::Xai(client.with_workspace(ws)),
+            Self::OpenAi(client) => Self::OpenAi(client.with_workspace(ws)),
+        }
+    }
+
+    pub fn set_workspace(&mut self, ws: impl Into<String>) {
+        let ws = ws.into();
+        match self {
+            ProviderClient::Anthropic(c) => c.set_workspace(ws),
+            ProviderClient::Xai(c) | ProviderClient::OpenAi(c) => c.set_workspace(ws),
+        }
+    }
+
+    pub fn clear_workspace(&mut self) {
+        match self {
+            ProviderClient::Anthropic(c) => c.clear_workspace(),
+            ProviderClient::Xai(c) | ProviderClient::OpenAi(c) => c.clear_workspace(),
+        }
+    }
+
+    #[must_use]
     pub fn with_prompt_cache(self, prompt_cache: PromptCache) -> Self {
         match self {
             Self::Anthropic(client) => Self::Anthropic(client.with_prompt_cache(prompt_cache)),

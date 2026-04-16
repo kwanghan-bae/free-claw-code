@@ -27,6 +27,9 @@ pub struct ApiRequest {
     /// `"planning"`). Passed through to the provider client so it can be emitted
     /// as the `x-free-claw-hints` header.
     pub task_hint: Option<String>,
+    /// Workspace root path emitted as the `x-free-claw-workspace` header so
+    /// the upstream router can resolve the correct mempalace wing.
+    pub workspace: Option<String>,
     /// Propagation context for the W3C `traceparent` header, forwarded from
     /// the session so the provider client can emit it on the wire.
     pub trace_context: Option<telemetry::TraceContext>,
@@ -361,6 +364,7 @@ where
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
                 task_hint: Some(task_hint.clone()),
+                workspace: crate::prompt::workspace_header(&self.session),
                 trace_context: self.session.trace_context,
             };
             let events = match self.api_client.stream(request) {

@@ -517,6 +517,16 @@ fn get_actions_section() -> String {
     .join("\n")
 }
 
+/// Extract the workspace root path from the session for use as the
+/// `x-free-claw-workspace` header value.
+#[must_use]
+pub fn workspace_header(session: &crate::session::Session) -> Option<String> {
+    session
+        .workspace_root
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
 /// Classify the latest user message into a task-hint category.
 ///
 /// The returned label is attached to outbound API requests as the

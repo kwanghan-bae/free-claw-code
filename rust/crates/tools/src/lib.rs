@@ -4549,6 +4549,7 @@ impl ProviderRuntimeClient {
     fn clear_per_request_state(&mut self) {
         for entry in &mut self.chain {
             entry.client.clear_hints();
+            entry.client.clear_workspace();
             entry.client.clear_trace_context();
         }
     }
@@ -4587,11 +4588,17 @@ impl ApiClient for ProviderRuntimeClient {
             (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n"));
         let tool_choice = (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
 
-        // Apply per-request hints and trace context so the provider client
-        // emits the x-free-claw-hints and traceparent headers on the wire.
+        // Apply per-request hints, workspace, and trace context so the provider
+        // client emits x-free-claw-hints, x-free-claw-workspace, and traceparent
+        // headers on the wire.
         if let Some(h) = request.task_hint.as_deref() {
             for entry in &mut self.chain {
                 entry.client.set_hints(h);
+            }
+        }
+        if let Some(ws) = request.workspace.as_deref() {
+            for entry in &mut self.chain {
+                entry.client.set_workspace(ws);
             }
         }
         if let Some(ctx) = request.trace_context {

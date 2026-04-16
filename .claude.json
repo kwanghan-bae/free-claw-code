@@ -1,5 +1,16 @@
 {
   "permissions": {
     "defaultMode": "dontAsk"
+  },
+  "mcpServers": {
+    "mempalace": {
+      "command": "python",
+      "args": [
+        "-m",
+        "mempalace.mcp_server",
+        "--palace",
+        "~/.mempalace/palace"
+      ]
+    }
   }
 }
