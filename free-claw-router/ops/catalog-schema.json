@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResearchAgentCatalogEntry",
+  "type": "object",
+  "required": [
+    "provider_id", "model_id", "status", "context_window", "tool_use",
+    "structured_output", "free_tier", "pricing", "quirks", "evidence_urls"
+  ],
+  "properties": {
+    "provider_id": {"type": "string", "minLength": 1},
+    "model_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["added", "updated", "deprecated"]},
+    "context_window": {"type": "integer", "minimum": 1},
+    "tool_use": {"type": "boolean"},
+    "structured_output": {"enum": ["none", "partial", "full"]},
+    "free_tier": {
+      "type": "object",
+      "required": ["reset_policy"],
+      "properties": {
+        "rpm": {"type": ["integer", "null"], "minimum": 0},
+        "tpm": {"type": ["integer", "null"], "minimum": 0},
+        "daily": {"type": ["integer", "null"], "minimum": 0},
+        "reset_policy": {"enum": ["minute", "hour", "day", "rolling"]}
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "required": ["input", "output", "free"],
+      "properties": {
+        "input": {"type": "number", "const": 0},
+        "output": {"type": "number", "const": 0},
+        "free": {"type": "boolean", "const": true}
+      }
+    },
+    "quirks": {"type": "array", "items": {"type": "string"}},
+    "evidence_urls": {"type": "array", "minItems": 1, "items": {"type": "string", "format": "uri"}},
+    "deprecation_reason": {"type": ["string", "null"]},
+    "replaced_by": {"type": ["string", "null"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "deprecated"}}, "required": ["status"]},
+      "then": {"required": ["deprecation_reason", "replaced_by"]}
+    }
+  ],
+  "additionalProperties": false
+}

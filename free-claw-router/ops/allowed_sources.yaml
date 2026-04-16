@@ -1,0 +1,9 @@
+allowed:
+  - https://openrouter.ai/api/
+  - https://openrouter.ai/models/
+  - https://api.groq.com/openai/v1/
+  - https://console.groq.com/docs/
+  - https://z.ai/
+  - https://api.cerebras.ai/v1/
+  - https://inference-api.cerebras.ai/
+  - https://ollama.com/library/
