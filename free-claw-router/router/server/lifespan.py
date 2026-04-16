@@ -16,6 +16,8 @@ from router.skills.triggers import register_trigger_jobs
 from router.learning.nudge_cache import NudgeCache, ConversationBuffer
 from router.learning.rule_detector import RuleDetector
 from router.learning.nudge_injector import NudgeInjector
+from router.learning.batch_analyzer import BatchAnalyzer
+from router.dispatch.client import DispatchClient
 
 DEFAULT_DB = Path.home() / ".free-claw-router" / "telemetry.db"
 DATA_DIR = Path(__file__).resolve().parent.parent / "catalog" / "data"
@@ -63,6 +65,30 @@ async def lifespan(app: FastAPI):
     rule_detector = RuleDetector()
     nudge_injector = NudgeInjector(cache=nudge_cache)
 
+    async def _batch_llm(messages, model=None):
+        """Route LLM calls through our own dispatch (loopback)."""
+        snapshot = live.snapshot()
+        provider = None
+        model_spec = None
+        for p in snapshot.providers:
+            for m in p.models:
+                if m.status == "active":
+                    provider = p
+                    model_spec = m
+                    break
+            if provider:
+                break
+        if not provider or not model_spec:
+            return ""
+        result = await DispatchClient().call(
+            provider, model_spec,
+            {"messages": messages},
+            {"x-free-claw-hints": "summary"},
+        )
+        return result.body.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+    batch_analyzer = BatchAnalyzer(llm_fn=_batch_llm)
+
     from apscheduler.schedulers.background import BackgroundScheduler
     bg_scheduler = BackgroundScheduler()
     bg_scheduler.add_job(session_detector.check_and_mine, "interval", seconds=60, id="session_close_check")
@@ -84,6 +110,7 @@ async def lifespan(app: FastAPI):
     app.state.conv_buffer = conv_buffer
     app.state.rule_detector = rule_detector
     app.state.nudge_injector = nudge_injector
+    app.state.batch_analyzer = batch_analyzer
     try:
         yield
     finally:

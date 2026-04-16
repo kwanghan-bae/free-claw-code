@@ -264,6 +264,18 @@ async def chat_completions(request: Request) -> JSONResponse:
                 if msg.get("role") == "assistant":
                     _conv_buf.append_assistant(_trace_hex, msg.get("content", ""))
 
+    # Batch analysis every 5 turns (P3)
+    _batch = getattr(app.state, "batch_analyzer", None)
+    if _conv_buf and _batch and _ncache:
+        if _conv_buf.turn_count(_trace_hex) % 5 == 0 and _conv_buf.turn_count(_trace_hex) > 0:
+            import asyncio
+            try:
+                batch_nudges = await _batch.analyze(_trace_hex, _conv_buf)
+                for n in batch_nudges:
+                    _ncache.push(_trace_hex, n)
+            except Exception:
+                pass  # batch analysis is best-effort
+
     resp = JSONResponse(status_code=result.status, content=result.body)
     for k in ("x-ratelimit-remaining-requests", "x-ratelimit-remaining-tokens"):
         if k in result.response_headers:
