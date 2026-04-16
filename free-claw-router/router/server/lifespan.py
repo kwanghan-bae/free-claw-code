@@ -13,6 +13,13 @@ from router.skills.bridge import SkillsBridge
 from router.skills.analyzer_hook import AnalyzerHook
 from router.skills.adapter import build_analysis_context
 from router.skills.triggers import register_trigger_jobs
+from router.learning.nudge_cache import NudgeCache, ConversationBuffer
+from router.learning.rule_detector import RuleDetector
+from router.learning.nudge_injector import NudgeInjector
+from router.learning.batch_analyzer import BatchAnalyzer
+from router.learning.insight_generator import InsightGenerator
+from router.learning.trajectory_compressor import TrajectoryCompressor
+from router.dispatch.client import DispatchClient
 
 DEFAULT_DB = Path.home() / ".free-claw-router" / "telemetry.db"
 DATA_DIR = Path(__file__).resolve().parent.parent / "catalog" / "data"
@@ -54,6 +61,73 @@ async def lifespan(app: FastAPI):
     # Register analyzer as a mining hook
     session_detector._on_mine_hooks.append(analyzer_hook.on_session_mined)
 
+    # Learning (P3)
+    nudge_cache = NudgeCache()
+    conv_buffer = ConversationBuffer()
+    rule_detector = RuleDetector()
+    nudge_injector = NudgeInjector(cache=nudge_cache)
+
+    async def _batch_llm(messages, model=None):
+        """Route LLM calls through our own dispatch (loopback)."""
+        snapshot = live.snapshot()
+        provider = None
+        model_spec = None
+        for p in snapshot.providers:
+            for m in p.models:
+                if m.status == "active":
+                    provider = p
+                    model_spec = m
+                    break
+            if provider:
+                break
+        if not provider or not model_spec:
+            return ""
+        result = await DispatchClient().call(
+            provider, model_spec,
+            {"messages": messages},
+            {"x-free-claw-hints": "summary"},
+        )
+        return result.body.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+    batch_analyzer = BatchAnalyzer(llm_fn=_batch_llm)
+
+    # Insight + trajectory hooks (P3, fire on session-close mining)
+    import os
+
+    def _search_mempalace(query, wing=None, n_results=5):
+        from mempalace.searcher import search_memories
+        return search_memories(query, palace_path=os.path.expanduser("~/.mempalace/palace"),
+                               wing=wing, n_results=n_results)
+
+    def _add_mempalace_drawer(wing, room, content):
+        from mempalace.mcp_server import tool_add_drawer
+        tool_add_drawer(wing=wing, room=room, content=content)
+
+    insight_gen = InsightGenerator(
+        search_fn=_search_mempalace, llm_fn=_batch_llm, add_drawer_fn=_add_mempalace_drawer,
+    )
+    traj_comp = TrajectoryCompressor(llm_fn=_batch_llm, add_drawer_fn=_add_mempalace_drawer)
+
+    def _insight_hook(trace_id, transcript, wing):
+        import asyncio
+        try:
+            asyncio.run(insight_gen.generate(project_wing=wing))
+        except RuntimeError:
+            # Event loop already running — use create_task instead
+            loop = asyncio.get_event_loop()
+            loop.create_task(insight_gen.generate(project_wing=wing))
+
+    def _trajectory_hook(trace_id, transcript, wing):
+        import asyncio
+        try:
+            asyncio.run(traj_comp.compress(trace_id=trace_id, transcript=transcript, project_wing=wing))
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            loop.create_task(traj_comp.compress(trace_id=trace_id, transcript=transcript, project_wing=wing))
+
+    session_detector._on_mine_hooks.append(_insight_hook)
+    session_detector._on_mine_hooks.append(_trajectory_hook)
+
     from apscheduler.schedulers.background import BackgroundScheduler
     bg_scheduler = BackgroundScheduler()
     bg_scheduler.add_job(session_detector.check_and_mine, "interval", seconds=60, id="session_close_check")
@@ -71,6 +145,11 @@ async def lifespan(app: FastAPI):
     app.state.session_detector = session_detector
     app.state.wing_manager = wing_mgr
     app.state.skills_bridge = skills_bridge
+    app.state.nudge_cache = nudge_cache
+    app.state.conv_buffer = conv_buffer
+    app.state.rule_detector = rule_detector
+    app.state.nudge_injector = nudge_injector
+    app.state.batch_analyzer = batch_analyzer
     try:
         yield
     finally:

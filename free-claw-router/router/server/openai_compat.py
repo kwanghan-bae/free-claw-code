@@ -101,6 +101,11 @@ async def chat_completions(request: Request) -> JSONResponse:
             last_request_gap_seconds=_gap,
         )
 
+    # Learning nudge injection (P3)
+    _nudge_inj = getattr(app.state, "nudge_injector", None)
+    if _nudge_inj is not None:
+        payload = _nudge_inj.inject(payload, trace_id=_trace_hex)
+
     # Record activity for session-close detection
     detector = getattr(app.state, "session_detector", None)
     if detector is not None:
@@ -235,6 +240,42 @@ async def chat_completions(request: Request) -> JSONResponse:
         return result
 
     result = await run_fallback_chain(chain, call_one)
+
+    # Learning: scan response + buffer conversation (P3)
+    _rule_det = getattr(app.state, "rule_detector", None)
+    _conv_buf = getattr(app.state, "conv_buffer", None)
+    _ncache = getattr(app.state, "nudge_cache", None)
+    if _rule_det and _ncache and result.status == 200:
+        assistant_text = ""
+        for ch in result.body.get("choices", []):
+            msg = ch.get("message", {})
+            if msg.get("role") == "assistant":
+                assistant_text = msg.get("content", "")
+        if assistant_text:
+            for nudge in _rule_det.scan(assistant_text):
+                _ncache.push(_trace_hex, nudge)
+    if _conv_buf:
+        for m in payload.get("messages", []):
+            if m.get("role") == "user" and isinstance(m.get("content"), str):
+                _conv_buf.append_user(_trace_hex, m["content"])
+        if result.status == 200:
+            for ch in result.body.get("choices", []):
+                msg = ch.get("message", {})
+                if msg.get("role") == "assistant":
+                    _conv_buf.append_assistant(_trace_hex, msg.get("content", ""))
+
+    # Batch analysis every 5 turns (P3)
+    _batch = getattr(app.state, "batch_analyzer", None)
+    if _conv_buf and _batch and _ncache:
+        if _conv_buf.turn_count(_trace_hex) % 5 == 0 and _conv_buf.turn_count(_trace_hex) > 0:
+            import asyncio
+            try:
+                batch_nudges = await _batch.analyze(_trace_hex, _conv_buf)
+                for n in batch_nudges:
+                    _ncache.push(_trace_hex, n)
+            except Exception:
+                pass  # batch analysis is best-effort
+
     resp = JSONResponse(status_code=result.status, content=result.body)
     for k in ("x-ratelimit-remaining-requests", "x-ratelimit-remaining-tokens"):
         if k in result.response_headers:
