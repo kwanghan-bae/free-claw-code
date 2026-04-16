@@ -363,6 +363,15 @@ fi
 
 step "Next steps"
 
+# --- free-claw-router sidecar ---
+if command -v uv >/dev/null 2>&1; then
+  echo "==> Bootstrapping free-claw-router sidecar"
+  (cd "${SCRIPT_DIR}/free-claw-router" && uv sync --extra dev)
+  echo "    To run:  cd free-claw-router && uv run uvicorn router.server.openai_compat:app --port 7801"
+else
+  echo "WARN: uv not found. Install from https://astral.sh/uv/ to enable the free-claw-router sidecar."
+fi
+
 cat <<EOF
 ${COLOR_GREEN}Claw Code is built and ready.${COLOR_RESET}
 
