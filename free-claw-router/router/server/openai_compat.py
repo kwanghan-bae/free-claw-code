@@ -184,7 +184,25 @@ async def chat_completions(request: Request) -> JSONResponse:
             except Exception:
                 pass
 
+        # Record request event for transcript mining (best-effort)
+        if store:
+            try:
+                store.insert_event(span_id=span_id, kind="request",
+                    payload_json=json.dumps({"messages": payload.get("messages", [])}),
+                    ts_ms=int(time.time() * 1000))
+            except Exception:
+                pass
+
         result = await _dispatch.call(provider, cand.model, payload, dict(request.headers))
+
+        # Record response event for transcript mining (best-effort)
+        if store and result.status == 200:
+            try:
+                store.insert_event(span_id=span_id, kind="response",
+                    payload_json=json.dumps(result.body),
+                    ts_ms=int(time.time() * 1000))
+            except Exception:
+                pass
 
         if result.status == 200:
             await bucket.commit(tok, tokens_actual=estimated)
