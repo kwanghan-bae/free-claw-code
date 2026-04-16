@@ -1,0 +1,19 @@
+provider_id: lmstudio
+base_url: http://127.0.0.1:1234/v1
+auth: {env: LMSTUDIO_API_KEY, scheme: none}
+known_ratelimit_header_schema: none
+models:
+  - model_id: qwen2.5-coder-14b
+    status: active
+    context_window: 32768
+    tool_use: true
+    structured_output: partial
+    free_tier: {rpm: null, tpm: null, daily: null, reset_policy: rolling}
+    pricing: {input: 0, output: 0, free: true}
+    quirks:
+      - "local LM Studio server; model ID must match what's loaded in the UI"
+      - "tool_use requires an Instruct-tuned variant"
+    evidence_urls:
+      - https://lmstudio.ai/docs/local-server
+    last_verified: "2026-04-15T00:00:00Z"
+    first_seen: "2026-02-15"

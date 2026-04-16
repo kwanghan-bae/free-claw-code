@@ -1,0 +1,19 @@
+provider_id: zai
+base_url: https://api.z.ai/api/paas/v4
+auth: {env: ZAI_API_KEY, scheme: bearer}
+known_ratelimit_header_schema: generic
+models:
+  - model_id: glm-4-flash
+    status: active
+    context_window: 128000
+    tool_use: true
+    structured_output: partial
+    free_tier: {rpm: 60, tpm: 600000, daily: null, reset_policy: minute}
+    pricing: {input: 0, output: 0, free: true}
+    quirks:
+      - "base URL differs from openrouter-hosted glm variants"
+      - "bearer auth uses API key generated at z.ai dashboard"
+    evidence_urls:
+      - https://docs.z.ai/guides/llm/glm-4-flash
+    last_verified: "2026-04-15T00:00:00Z"
+    first_seen: "2026-03-20"
