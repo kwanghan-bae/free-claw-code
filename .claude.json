@@ -11,6 +11,17 @@
         "--palace",
         "~/.mempalace/palace"
       ]
+    },
+    "openspace": {
+      "command": "python",
+      "args": [
+        "-m",
+        "openspace.mcp_server"
+      ],
+      "toolTimeout": 600,
+      "env": {
+        "OPENSPACE_WORKSPACE": "/Users/joel/Desktop/git/OpenSpace"
+      }
     }
   }
 }

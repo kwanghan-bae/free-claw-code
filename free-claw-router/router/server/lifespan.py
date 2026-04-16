@@ -9,6 +9,10 @@ from router.memory.miner import MemoryMiner
 from router.memory.idle_detector import SessionCloseDetector
 from router.memory.transcript import build_transcript
 from router.memory.wing_manager import WingManager
+from router.skills.bridge import SkillsBridge
+from router.skills.analyzer_hook import AnalyzerHook
+from router.skills.adapter import build_analysis_context
+from router.skills.triggers import register_trigger_jobs
 
 DEFAULT_DB = Path.home() / ".free-claw-router" / "telemetry.db"
 DATA_DIR = Path(__file__).resolve().parent.parent / "catalog" / "data"
@@ -37,9 +41,26 @@ async def lifespan(app: FastAPI):
         wing_resolve_fn=lambda ws: wing_mgr.resolve(ws),
     )
 
+    # Skills (P2)
+    skills_bridge = SkillsBridge()
+    skills_bridge.initialize()
+
+    analyzer_hook = AnalyzerHook(
+        bridge=skills_bridge,
+        build_context_fn=build_analysis_context,
+        telemetry_store=store,
+    )
+
+    # Register analyzer as a mining hook
+    session_detector._on_mine_hooks.append(analyzer_hook.on_session_mined)
+
     from apscheduler.schedulers.background import BackgroundScheduler
     bg_scheduler = BackgroundScheduler()
     bg_scheduler.add_job(session_detector.check_and_mine, "interval", seconds=60, id="session_close_check")
+
+    # Register periodic trigger jobs
+    register_trigger_jobs(bg_scheduler, telemetry_store=store, skill_bridge=skills_bridge)
+
     bg_scheduler.start()
 
     app.state.telemetry_store = store
@@ -49,6 +70,7 @@ async def lifespan(app: FastAPI):
     app.state.injector = injector
     app.state.session_detector = session_detector
     app.state.wing_manager = wing_mgr
+    app.state.skills_bridge = skills_bridge
     try:
         yield
     finally:
