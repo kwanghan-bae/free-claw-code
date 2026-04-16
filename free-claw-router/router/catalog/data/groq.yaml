@@ -1,0 +1,30 @@
+provider_id: groq
+base_url: https://api.groq.com/openai/v1
+auth: {env: GROQ_API_KEY, scheme: bearer}
+known_ratelimit_header_schema: groq_standard
+models:
+  - model_id: llama-3.3-70b-versatile
+    status: active
+    context_window: 32768
+    tool_use: true
+    structured_output: full
+    free_tier: {rpm: 30, tpm: 6000, daily: 14400, reset_policy: minute}
+    pricing: {input: 0, output: 0, free: true}
+    quirks:
+      - "strict tool arg schema; reject extra keys"
+    evidence_urls:
+      - https://console.groq.com/docs/models
+      - https://api.groq.com/openai/v1/models
+    last_verified: "2026-04-15T00:00:00Z"
+    first_seen: "2026-03-10"
+  - model_id: qwen-qwq-32b
+    status: active
+    context_window: 32768
+    tool_use: true
+    structured_output: full
+    free_tier: {rpm: 30, tpm: 6000, daily: 14400, reset_policy: minute}
+    pricing: {input: 0, output: 0, free: true}
+    quirks: []
+    evidence_urls: [https://console.groq.com/docs/models]
+    last_verified: "2026-04-15T00:00:00Z"
+    first_seen: "2026-03-20"
