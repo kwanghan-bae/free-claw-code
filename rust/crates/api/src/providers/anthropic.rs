@@ -124,6 +124,7 @@ pub struct AnthropicClient {
     session_tracer: Option<SessionTracer>,
     trace_context: Option<TraceContext>,
     hints: Option<String>,
+    workspace: Option<String>,
     prompt_cache: Option<PromptCache>,
     last_prompt_cache_record: Arc<Mutex<Option<PromptCacheRecord>>>,
 }
@@ -142,6 +143,7 @@ impl AnthropicClient {
             session_tracer: None,
             trace_context: None,
             hints: None,
+            workspace: None,
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
         }
@@ -160,6 +162,7 @@ impl AnthropicClient {
             session_tracer: None,
             trace_context: None,
             hints: None,
+            workspace: None,
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
         }
@@ -251,6 +254,20 @@ impl AnthropicClient {
 
     pub fn clear_hints(&mut self) {
         self.hints = None;
+    }
+
+    #[must_use]
+    pub fn with_workspace(mut self, ws: impl Into<String>) -> Self {
+        self.workspace = Some(ws.into());
+        self
+    }
+
+    pub fn set_workspace(&mut self, ws: impl Into<String>) {
+        self.workspace = Some(ws.into());
+    }
+
+    pub fn clear_workspace(&mut self) {
+        self.workspace = None;
     }
 
     #[must_use]
@@ -524,6 +541,9 @@ impl AnthropicClient {
         }
         if let Some(hints) = self.hints.as_deref() {
             request_builder = request_builder.header("x-free-claw-hints", hints);
+        }
+        if let Some(ws) = self.workspace.as_deref() {
+            request_builder = request_builder.header("x-free-claw-workspace", ws);
         }
         request_builder
     }

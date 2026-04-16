@@ -96,6 +96,7 @@ pub struct OpenAiCompatClient {
     max_backoff: Duration,
     trace_context: Option<TraceContext>,
     hints: Option<String>,
+    workspace: Option<String>,
 }
 
 impl OpenAiCompatClient {
@@ -119,6 +120,7 @@ impl OpenAiCompatClient {
             max_backoff: DEFAULT_MAX_BACKOFF,
             trace_context: None,
             hints: None,
+            workspace: None,
         }
     }
 
@@ -177,6 +179,20 @@ impl OpenAiCompatClient {
 
     pub fn clear_hints(&mut self) {
         self.hints = None;
+    }
+
+    #[must_use]
+    pub fn with_workspace(mut self, ws: impl Into<String>) -> Self {
+        self.workspace = Some(ws.into());
+        self
+    }
+
+    pub fn set_workspace(&mut self, ws: impl Into<String>) {
+        self.workspace = Some(ws.into());
+    }
+
+    pub fn clear_workspace(&mut self) {
+        self.workspace = None;
     }
 
     pub async fn send_message(
@@ -295,6 +311,9 @@ impl OpenAiCompatClient {
         }
         if let Some(hints) = self.hints.as_deref() {
             req = req.header("x-free-claw-hints", hints);
+        }
+        if let Some(ws) = self.workspace.as_deref() {
+            req = req.header("x-free-claw-workspace", ws);
         }
         req.send().await.map_err(ApiError::from)
     }
