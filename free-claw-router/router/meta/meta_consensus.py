@@ -3,6 +3,9 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from .meta_suggestions import MetaSuggestion
 
+CONSENSUS_MIN_VOTES = 3
+CONSENSUS_DAILY_CAP = 2
+
 
 @dataclass
 class EditPlan:
@@ -17,8 +20,8 @@ class EditPlan:
 def build_edit_plans(
     suggestions: list[MetaSuggestion],
     *,
-    min_votes: int = 3,
-    daily_cap: int = 2,
+    min_votes: int = CONSENSUS_MIN_VOTES,
+    daily_cap: int = CONSENSUS_DAILY_CAP,
 ) -> list[EditPlan]:
     groups: dict[tuple[str, str], list[MetaSuggestion]] = defaultdict(list)
     for s in suggestions:

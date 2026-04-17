@@ -1,6 +1,8 @@
 from __future__ import annotations
 from enum import Enum
 
+EVAL_DEGRADATION_THRESHOLD = 0.15
+
 
 class Verdict(str, Enum):
     KEEP = "keep"
@@ -9,7 +11,7 @@ class Verdict(str, Enum):
 
 
 class MetaEvaluator:
-    def __init__(self, degradation_threshold: float = 0.15) -> None:
+    def __init__(self, degradation_threshold: float = EVAL_DEGRADATION_THRESHOLD) -> None:
         self._threshold = degradation_threshold
 
     def evaluate(self, pre: dict[str, float], post: dict[str, float]) -> Verdict:
