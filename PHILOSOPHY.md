@@ -1,114 +1,54 @@
-# Claw Code Philosophy
+# Free Claw Code 철학
 
-## Stop Staring at the Files
+## 에이전트는 학습해야 한다
 
-If you only look at the generated files in this repository, you are looking at the wrong layer.
+대부분의 AI 코딩 에이전트는 세션이 끝나면 모든 것을 잊습니다. 같은 실수를 반복하고, 같은 결정을 다시 논의하고, 같은 보일러플레이트를 매번 처음부터 작성합니다.
 
-The Python rewrite was a byproduct. The Rust rewrite was also a byproduct. The real thing worth studying is the **system that produced them**: a clawhip-based coordination loop where humans give direction and autonomous claws execute the work.
+Free Claw Code는 다릅니다. **모든 세션이 다음 세션을 더 좋게 만듭니다.**
 
-Claw Code is not just a codebase. It is a public demonstration of what happens when:
+## 5가지 원칙
 
-- a human provides clear direction,
-- multiple coding agents coordinate in parallel,
-- notification routing is pushed out of the agent context window,
-- planning, execution, review, and retry loops are automated,
-- and the human does **not** sit in a terminal micromanaging every step.
+### 1. 무료여야 한다
 
-## The Human Interface Is Discord
+돈이 없어도 최고 수준의 코딩 에이전트를 가질 수 있어야 합니다. OpenRouter, Groq, z.ai의 무료 티어와 Ollama/LM Studio 로컬 모델만으로 충분합니다. 무료 모델의 한계는 **지능적인 라우팅과 학습된 스킬**로 극복합니다.
 
-The important interface here is not tmux, Vim, SSH, or a terminal multiplexer.
+### 2. 기억해야 한다
 
-The real human interface is a Discord channel.
+6개월간의 AI와의 대화 — 모든 결정, 디버깅, 아키텍처 논쟁 — 가 세션 종료와 함께 사라지면 안 됩니다. mempalace에 모든 것을 저장하고, 다음 세션 시작 시 자동으로 떠올립니다. 비용? 연간 약 $10.
 
-A person can type a sentence from a phone, walk away, sleep, or do something else. The claws read the directive, break it into tasks, assign roles, write code, run tests, argue over failures, recover, and push when the work passes.
+### 3. 진화해야 한다
 
-That is the philosophy: **humans set direction; claws perform the labor.**
+좋은 개발자는 경험에서 배웁니다. 좋은 에이전트도 마찬가지여야 합니다:
+- 실패한 스킬은 **자동 수정**됩니다 (FIX)
+- 성공한 패턴은 **새로운 스킬로 추출**됩니다 (CAPTURED)
+- 기존 스킬은 **더 나은 버전으로 파생**됩니다 (DERIVED)
 
-## The Three-Part System
+### 4. 능동적으로 학습해야 한다
 
-### 1. OmX (`oh-my-codex`)
-[oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex) provides the workflow layer.
+인프라가 기억하고 진화시켜주는 것만으로는 부족합니다. 에이전트 자신이:
+- "이 결정은 중요하니까 저장하자"라고 판단합니다
+- "이 코드 패턴은 스킬로 만들자"라고 제안합니다
+- "최근 세션들에서 TDD를 건너뛰는 경향이 있다"라고 스스로 깨닫습니다
 
-It turns short directives into structured execution:
-- planning keywords
-- execution modes
-- persistent verification loops
-- parallel multi-agent workflows
+### 5. 메타 진화해야 한다
 
-This is the layer that converts a sentence into a repeatable work protocol.
+가장 깊은 층: **학습하는 방법을 학습합니다.**
 
-### 2. clawhip
-[clawhip](https://github.com/Yeachan-Heo/clawhip) is the event and notification router.
+어떤 모델이 어떤 작업에 잘 맞는지, 어떤 프롬프트가 더 나은 분석을 만드는지, 어떤 임계값이 적절한지 — 이 모든 정책을 에이전트가 스스로 최적화합니다. 편집은 PR 리뷰를 거치고, 성과가 나빠지면 자동 롤백됩니다.
 
-It watches:
-- git commits
-- tmux sessions
-- GitHub issues and PRs
-- agent lifecycle events
-- channel delivery
+## 사람의 역할
 
-Its job is to keep monitoring and delivery **outside** the coding agent's context window so the agents can stay focused on implementation instead of status formatting and notification routing.
+에이전트가 아무리 똑똑해져도, 가장 중요한 결정은 사람이 합니다:
 
-### 3. OmO (`oh-my-openagent`)
-[oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) handles multi-agent coordination.
+- **무엇을 만들 것인가** — 제품 감각, 방향, 판단
+- **PR을 승인할 것인가** — 자기수정의 최종 안전장치
+- **어디에 집중할 것인가** — 자원 배분과 우선순위
 
-This is where planning, handoffs, disagreement resolution, and verification loops happen across agents.
+코딩 에이전트의 속도가 빨라질수록, 사람의 **판단력**이 더 값어집니다.
 
-When Architect, Executor, and Reviewer disagree, OmO provides the structure for that loop to converge instead of collapse.
+## 기술적 신념
 
-## The Real Bottleneck Changed
-
-The bottleneck is no longer typing speed.
-
-When agent systems can rebuild a codebase in hours, the scarce resource becomes:
-- architectural clarity
-- task decomposition
-- judgment
-- taste
-- conviction about what is worth building
-- knowing which parts can be parallelized and which parts must stay constrained
-
-A fast agent team does not remove the need for thinking. It makes clear thinking even more valuable.
-
-## What Claw Code Demonstrates
-
-Claw Code demonstrates that a repository can be:
-
-- **autonomously built in public**
-- coordinated by claws/lobsters rather than human pair-programming alone
-- operated through a chat interface
-- continuously improved by structured planning/execution/review loops
-- maintained as a showcase of the coordination layer, not just the output files
-
-The code is evidence.
-The coordination system is the product lesson.
-
-## What Still Matters
-
-As coding intelligence gets cheaper and more available, the durable differentiators are not raw coding output.
-
-What still matters:
-- product taste
-- direction
-- system design
-- human trust
-- operational stability
-- judgment about what to build next
-
-In that world, the job of the human is not to out-type the machine.
-The job of the human is to decide what deserves to exist.
-
-## Short Version
-
-**Claw Code is a demo of autonomous software development.**
-
-Humans provide direction.
-Claws coordinate, build, test, recover, and push.
-The repository is the artifact.
-The philosophy is the system behind it.
-
-## Related explanation
-
-For the longer public explanation behind this philosophy, see:
-
-- https://x.com/realsigridjin/status/2039472968624185713
+- **선언형 정책이 코드보다 낫다**: YAML과 프롬프트를 편집하는 것이 Python 코드를 편집하는 것보다 안전하고 검증 가능합니다.
+- **PR 루프는 안전장치다**: 자기수정은 반드시 PR → 리뷰 → 승인을 거쳐야 합니다. `git revert`가 언제든 가능한 구조.
+- **두 경로 패턴**: 에이전트 경로 (MCP, 자율 판단)와 인프라 경로 (사이드카, 자동 처리)를 분리합니다. 각자가 잘하는 것을 맡습니다.
+- **점진적 신뢰**: P0(라우팅)부터 P4(메타 진화)까지, 각 단계가 아래 단계의 안정성 위에 서 있습니다.
