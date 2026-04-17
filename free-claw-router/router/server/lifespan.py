@@ -177,7 +177,7 @@ async def lifespan(app: FastAPI):
         log = logging.getLogger("meta_cron")
         meta_store.prune()
         all_suggestions = meta_store.read_all()
-        plans = build_edit_plans(all_suggestions, min_votes=3, daily_cap=2)
+        plans = build_edit_plans(all_suggestions)
         if not plans:
             log.info("No meta edit plans reached consensus")
             return

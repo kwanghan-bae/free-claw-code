@@ -20,3 +20,12 @@ targets:
   - path: router/skills/triggers.py
     type: config_only
     description: "Evolution trigger thresholds"
+  - path: router/meta/meta_analyzer.py
+    type: prompt_only
+    description: "Meta-evolution analyzer system prompt (recursion: the agent can rewrite its own judgment criteria)"
+  - path: router/meta/meta_consensus.py
+    type: config_only
+    description: "Consensus voting thresholds (min_votes, daily_cap)"
+  - path: router/meta/meta_evaluator.py
+    type: config_only
+    description: "Post-edit evaluator degradation threshold"

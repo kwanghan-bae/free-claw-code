@@ -13,7 +13,7 @@ impl TraceId {
     pub fn random() -> Self {
         loop {
             let mut bytes = [0u8; 16];
-            rand::thread_rng().fill_bytes(&mut bytes);
+            rand::rng().fill_bytes(&mut bytes);
             let id = Self(bytes);
             if !id.is_zero() {
                 return id;
@@ -31,7 +31,7 @@ impl SpanId {
     pub fn random() -> Self {
         loop {
             let mut bytes = [0u8; 8];
-            rand::thread_rng().fill_bytes(&mut bytes);
+            rand::rng().fill_bytes(&mut bytes);
             let id = Self(bytes);
             if !id.is_zero() {
                 return id;
