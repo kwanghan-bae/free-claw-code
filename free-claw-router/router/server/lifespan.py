@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import json
 from pathlib import Path
 from fastapi import FastAPI
 from router.telemetry.store import Store
@@ -20,6 +21,11 @@ from router.learning.batch_analyzer import BatchAnalyzer
 from router.learning.insight_generator import InsightGenerator
 from router.learning.trajectory_compressor import TrajectoryCompressor
 from router.dispatch.client import DispatchClient
+from router.meta.meta_analyzer import MetaAnalyzer
+from router.meta.meta_suggestions import SuggestionStore
+from router.meta.meta_consensus import build_edit_plans
+from router.meta.meta_editor import MetaEditor
+from router.meta.meta_pr import MetaPR
 
 DEFAULT_DB = Path.home() / ".free-claw-router" / "telemetry.db"
 DATA_DIR = Path(__file__).resolve().parent.parent / "catalog" / "data"
@@ -128,12 +134,69 @@ async def lifespan(app: FastAPI):
     session_detector._on_mine_hooks.append(_insight_hook)
     session_detector._on_mine_hooks.append(_trajectory_hook)
 
+    # Meta-evolution (P4)
+    suggestions_path = Path.home() / ".free-claw-router" / "meta_suggestions.json"
+    meta_store = SuggestionStore(path=suggestions_path)
+    targets_path = Path(__file__).resolve().parent.parent / "meta" / "meta_targets.yaml"
+    meta_analyzer = MetaAnalyzer(llm_fn=_batch_llm, targets_path=targets_path)
+
+    def _meta_hook(trace_id, transcript, wing):
+        """Extract trajectory from mempalace and analyze for meta-suggestions."""
+        import asyncio
+        try:
+            # Read the latest trajectory from mempalace (just stored by P3)
+            from mempalace.searcher import search_memories
+            import os
+            results = search_memories(
+                f"trajectory session {trace_id[:8]}",
+                palace_path=os.path.expanduser("~/.mempalace/palace"),
+                wing=wing, room="trajectories", n_results=1,
+            )
+            trajectory = {}
+            for r in results.get("results", []):
+                try:
+                    trajectory = json.loads(r.get("content", "{}"))
+                    break
+                except json.JSONDecodeError:
+                    pass
+            if trajectory:
+                suggestions = asyncio.run(meta_analyzer.analyze(trace_id=trace_id, trajectory=trajectory))
+                for s in suggestions:
+                    meta_store.append(s)
+        except RuntimeError:
+            pass  # event loop issue -- best effort
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("Meta hook failed", exc_info=True)
+
+    session_detector._on_mine_hooks.append(_meta_hook)
+
+    # Daily meta-evolution cron
+    def _daily_meta_evolution():
+        import logging
+        log = logging.getLogger("meta_cron")
+        meta_store.prune()
+        all_suggestions = meta_store.read_all()
+        plans = build_edit_plans(all_suggestions, min_votes=3, daily_cap=2)
+        if not plans:
+            log.info("No meta edit plans reached consensus")
+            return
+        editor = MetaEditor(base_dir=Path(__file__).resolve().parent.parent)
+        for plan in plans:
+            if editor.apply(plan):
+                log.info("Applied meta edit: %s", plan.direction)
+                meta_store.clear_target(plan.target_file)
+            else:
+                log.warning("Meta edit failed: %s", plan.direction)
+
     from apscheduler.schedulers.background import BackgroundScheduler
     bg_scheduler = BackgroundScheduler()
     bg_scheduler.add_job(session_detector.check_and_mine, "interval", seconds=60, id="session_close_check")
 
     # Register periodic trigger jobs
     register_trigger_jobs(bg_scheduler, telemetry_store=store, skill_bridge=skills_bridge)
+
+    bg_scheduler.add_job(_daily_meta_evolution, "cron", hour=3, id="daily_meta_evolution")
 
     bg_scheduler.start()
 

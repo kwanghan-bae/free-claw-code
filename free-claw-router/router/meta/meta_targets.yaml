@@ -1,0 +1,22 @@
+targets:
+  - path: router/routing/policy.yaml
+    type: yaml
+    description: "LLM routing priority per task type"
+  - path: router/vendor/openspace_engine/shims/prompts.py
+    type: prompt_only
+    description: "Evolver/analyzer system prompts"
+  - path: router/learning/rule_detector.py
+    type: config_only
+    description: "Rule-based nudge patterns"
+  - path: router/learning/batch_analyzer.py
+    type: prompt_only
+    description: "Batch analysis LLM prompt"
+  - path: router/learning/insight_generator.py
+    type: prompt_only
+    description: "Cross-session insight prompt"
+  - path: router/learning/trajectory_compressor.py
+    type: prompt_only
+    description: "Trajectory compression prompt"
+  - path: router/skills/triggers.py
+    type: config_only
+    description: "Evolution trigger thresholds"
