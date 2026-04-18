@@ -34,11 +34,13 @@ use serde_json::{json, Value};
 pub mod bash;
 pub mod browser;
 pub mod git;
+pub mod lsp;
 pub mod search;
 
 pub(crate) use bash::{classify_bash_permission, run_bash, workspace_test_branch_preflight};
 pub(crate) use browser::{run_web_fetch, run_web_search, WebFetchInput, WebSearchInput};
 pub(crate) use git::{current_git_branch, extract_commit_sha};
+pub(crate) use lsp::{run_lsp, LspInput};
 pub(crate) use search::{
     canonical_tool_token, deferred_tool_specs, normalize_tool_search_query, run_tool_search,
     search_tool_specs, SearchableToolSpec, ToolSearchInput,
@@ -46,7 +48,7 @@ pub(crate) use search::{
 pub use search::ToolSearchOutput;
 
 /// Global task registry shared across tool invocations within a session.
-fn global_lsp_registry() -> &'static LspRegistry {
+pub(crate) fn global_lsp_registry() -> &'static LspRegistry {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<LspRegistry> = OnceLock::new();
     REGISTRY.get_or_init(LspRegistry::new)
@@ -1667,24 +1669,6 @@ fn run_cron_list(_input: Value) -> Result<String, String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_lsp(input: LspInput) -> Result<String, String> {
-    let registry = global_lsp_registry();
-    let action = &input.action;
-    let path = input.path.as_deref();
-    let line = input.line;
-    let character = input.character;
-    let query = input.query.as_deref();
-
-    match registry.dispatch(action, path, line, character, query) {
-        Ok(result) => to_pretty_json(result),
-        Err(e) => to_pretty_json(json!({
-            "action": action,
-            "error": e,
-            "status": "error"
-        })),
-    }
-}
-
 #[allow(clippy::needless_pass_by_value)]
 fn run_list_mcp_resources(input: McpResourceInput) -> Result<String, String> {
     let registry = global_mcp_registry();
@@ -2248,19 +2232,6 @@ struct CronCreateInput {
 #[derive(Debug, Deserialize)]
 struct CronDeleteInput {
     cron_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct LspInput {
-    action: String,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    line: Option<u32>,
-    #[serde(default)]
-    character: Option<u32>,
-    #[serde(default)]
-    query: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
