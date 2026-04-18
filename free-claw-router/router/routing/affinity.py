@@ -42,17 +42,38 @@ def affinity_bonus(successes: int, samples: int, cfg: Optional[AffinityConfig] =
 def lookup_affinity(skill_id: Optional[str], model_id: str) -> tuple[int, int]:
     """Read (successes, samples) from the skill_model_affinity readmodel.
 
-    Returns (0, 0) if skill_id is None or the readmodel has no data for
-    this pair. That (0, 0) short-circuits cold-start logic in affinity_bonus.
+    The canonical readmodel (router/telemetry/readmodels.py) returns
+    rows shaped like ``{skill_id, model_id, trials, success_rate, avg_score}``.
+    We derive ``(successes, samples) = (round(trials * success_rate), trials)``.
+
+    Returns (0, 0) if skill_id is None, the readmodel has no data for
+    this (skill, model) pair, or any error occurs (fail-open so routing
+    is never blocked by telemetry unavailability).
     """
     if skill_id is None:
         return (0, 0)
     try:
-        from router.telemetry.readmodel.skill_model_affinity import get_pair_stats
-        return get_pair_stats(skill_id=skill_id, model_id=model_id, window_days=30)
-    except (ImportError, AttributeError):
-        # readmodel not available (e.g. first-run, migrations not applied) -> cold-start
+        import os
+        from pathlib import Path
+        from router.telemetry.readmodels import skill_model_affinity
+        from router.telemetry.store import Store
+
+        # Resolve telemetry db path. Mirrors router.server.meta_report._data_dir:
+        # FCR_DATA_DIR override (tests) -> ~/.free-claw-router (production).
+        data_dir = Path(os.getenv("FCR_DATA_DIR") or (Path.home() / ".free-claw-router"))
+        db_path = data_dir / "telemetry.db"
+        if not db_path.exists():
+            return (0, 0)
+
+        store = Store(path=db_path)
+        rows = skill_model_affinity(store, skill_id=skill_id)
+        for row in rows:
+            if row.get("model_id") == model_id:
+                trials = int(row.get("trials", 0) or 0)
+                rate = float(row.get("success_rate", 0.0) or 0.0)
+                successes = int(round(trials * rate))
+                return (successes, trials)
         return (0, 0)
     except Exception:
-        # any other readmodel issue -> cold-start (fail-open for routing)
+        # any readmodel issue -> cold-start (fail-open for routing)
         return (0, 0)
