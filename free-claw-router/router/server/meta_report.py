@@ -57,6 +57,16 @@ def meta_report() -> HTMLResponse:
     return HTMLResponse(content=html)
 
 
+@router.post("/meta/unblock/{target}")
+def meta_unblock(target: str) -> dict:
+    """Clear the consecutive-rollback block for a given target.
+    Called by `clawd meta unblock <target>` or manual curl.
+    """
+    from router.meta.meta_evaluator import unblock as _unblock
+    _unblock(target, store_dir=_data_dir())
+    return {"ok": True, "target": target}
+
+
 def _summarize_24h(db: Path) -> dict:
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     if not db.exists():
