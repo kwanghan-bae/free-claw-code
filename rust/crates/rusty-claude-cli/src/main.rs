@@ -11,6 +11,7 @@ mod doctor;
 mod init;
 mod input;
 mod output_format;
+mod permissions_runtime;
 mod render;
 
 use date_utils::civil_from_days;
@@ -18,6 +19,12 @@ use output_format::{
     format_auto_compaction_notice, format_compact_report, format_cost_report, format_model_report,
     format_model_switch_report, format_permissions_report, format_permissions_switch_report,
     format_resume_report, render_resume_usage,
+};
+use permissions_runtime::{
+    config_permission_mode_for_current_dir, default_permission_mode, detect_broad_cwd,
+    enforce_broad_cwd_policy, normalize_permission_mode, parse_permission_mode_arg,
+    permission_mode_for_mcp_tool, permission_mode_from_label, permission_mode_from_resolved,
+    permission_policy,
 };
 
 use std::collections::BTreeSet;
@@ -385,7 +392,7 @@ enum LocalHelpTopic {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CliOutputFormat {
+pub(crate) enum CliOutputFormat {
     Text,
     Json,
 }
@@ -1058,53 +1065,6 @@ fn current_tool_registry() -> Result<GlobalToolRegistry, String> {
             .map_err(|error| error.to_string())?;
     }
     Ok(registry)
-}
-
-fn parse_permission_mode_arg(value: &str) -> Result<PermissionMode, String> {
-    normalize_permission_mode(value)
-        .ok_or_else(|| {
-            format!(
-                "unsupported permission mode '{value}'. Use read-only, workspace-write, or danger-full-access."
-            )
-        })
-        .map(permission_mode_from_label)
-}
-
-fn permission_mode_from_label(mode: &str) -> PermissionMode {
-    match mode {
-        "read-only" => PermissionMode::ReadOnly,
-        "workspace-write" => PermissionMode::WorkspaceWrite,
-        "danger-full-access" => PermissionMode::DangerFullAccess,
-        other => panic!("unsupported permission mode label: {other}"),
-    }
-}
-
-fn permission_mode_from_resolved(mode: ResolvedPermissionMode) -> PermissionMode {
-    match mode {
-        ResolvedPermissionMode::ReadOnly => PermissionMode::ReadOnly,
-        ResolvedPermissionMode::WorkspaceWrite => PermissionMode::WorkspaceWrite,
-        ResolvedPermissionMode::DangerFullAccess => PermissionMode::DangerFullAccess,
-    }
-}
-
-fn default_permission_mode() -> PermissionMode {
-    env::var("RUSTY_CLAUDE_PERMISSION_MODE")
-        .ok()
-        .as_deref()
-        .and_then(normalize_permission_mode)
-        .map(permission_mode_from_label)
-        .or_else(config_permission_mode_for_current_dir)
-        .unwrap_or(PermissionMode::DangerFullAccess)
-}
-
-fn config_permission_mode_for_current_dir() -> Option<PermissionMode> {
-    let cwd = env::current_dir().ok()?;
-    let loader = ConfigLoader::default_for(&cwd);
-    loader
-        .load()
-        .ok()?
-        .permission_mode()
-        .map(permission_mode_from_resolved)
 }
 
 fn config_model_for_current_dir() -> Option<String> {
@@ -2858,85 +2818,6 @@ fn run_resume_command(
     }
 }
 
-/// Detect if the current working directory is "broad" (home directory or
-/// filesystem root). Returns the cwd path if broad, None otherwise.
-fn detect_broad_cwd() -> Option<PathBuf> {
-    let Ok(cwd) = env::current_dir() else {
-        return None;
-    };
-    let is_home = env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
-        .is_some_and(|h| Path::new(&h) == cwd);
-    let is_root = cwd.parent().is_none();
-    if is_home || is_root {
-        Some(cwd)
-    } else {
-        None
-    }
-}
-
-/// Enforce the broad-CWD policy: when running from home or root, either
-/// require the --allow-broad-cwd flag, or prompt for confirmation (interactive),
-/// or exit with an error (non-interactive).
-fn enforce_broad_cwd_policy(
-    allow_broad_cwd: bool,
-    output_format: CliOutputFormat,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if allow_broad_cwd {
-        return Ok(());
-    }
-    let Some(cwd) = detect_broad_cwd() else {
-        return Ok(());
-    };
-
-    let is_interactive = io::stdin().is_terminal();
-
-    if is_interactive {
-        // Interactive mode: print warning and ask for confirmation
-        eprintln!(
-            "Warning: claw is running from a very broad directory ({}).\n\
-             The agent can read and search everything under this path.\n\
-             Consider running from inside your project: cd /path/to/project && claw",
-            cwd.display()
-        );
-        eprint!("Continue anyway? [y/N]: ");
-        io::stderr().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let trimmed = input.trim().to_lowercase();
-        if trimmed != "y" && trimmed != "yes" {
-            eprintln!("Aborted.");
-            std::process::exit(0);
-        }
-        Ok(())
-    } else {
-        // Non-interactive mode: exit with error (JSON or text)
-        let message = format!(
-            "claw is running from a very broad directory ({}). \
-             The agent can read and search everything under this path. \
-             Use --allow-broad-cwd to proceed anyway, \
-             or run from inside your project: cd /path/to/project && claw",
-            cwd.display()
-        );
-        match output_format {
-            CliOutputFormat::Json => {
-                eprintln!(
-                    "{}",
-                    serde_json::json!({
-                        "type": "error",
-                        "error": message,
-                    })
-                );
-            }
-            CliOutputFormat::Text => {
-                eprintln!("error: {message}");
-            }
-        }
-        std::process::exit(1);
-    }
-}
-
 fn run_stale_base_preflight(flag_value: Option<&str>) {
     let Ok(cwd) = env::current_dir() else {
         return;
@@ -3442,28 +3323,6 @@ fn mcp_wrapper_tool_definitions() -> Vec<RuntimeToolDefinition> {
             required_permission: PermissionMode::ReadOnly,
         },
     ]
-}
-
-fn permission_mode_for_mcp_tool(tool: &McpTool) -> PermissionMode {
-    let read_only = mcp_annotation_flag(tool, "readOnlyHint");
-    let destructive = mcp_annotation_flag(tool, "destructiveHint");
-    let open_world = mcp_annotation_flag(tool, "openWorldHint");
-
-    if read_only && !destructive && !open_world {
-        PermissionMode::ReadOnly
-    } else if destructive || open_world {
-        PermissionMode::DangerFullAccess
-    } else {
-        PermissionMode::WorkspaceWrite
-    }
-}
-
-fn mcp_annotation_flag(tool: &McpTool, key: &str) -> bool {
-    tool.annotations
-        .as_ref()
-        .and_then(|annotations| annotations.get(key))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
 }
 
 struct HookAbortMonitor {
@@ -5292,15 +5151,6 @@ fn init_json_value(message: &str) -> serde_json::Value {
         "kind": "init",
         "message": message,
     })
-}
-
-fn normalize_permission_mode(mode: &str) -> Option<&'static str> {
-    match mode.trim() {
-        "read-only" => Some("read-only"),
-        "workspace-write" => Some("workspace-write"),
-        "danger-full-access" => Some("danger-full-access"),
-        _ => None,
-    }
 }
 
 fn render_diff_report() -> Result<String, Box<dyn std::error::Error>> {
@@ -7928,19 +7778,6 @@ impl ToolExecutor for CliToolExecutor {
             }
         }
     }
-}
-
-fn permission_policy(
-    mode: PermissionMode,
-    feature_config: &runtime::RuntimeFeatureConfig,
-    tool_registry: &GlobalToolRegistry,
-) -> Result<PermissionPolicy, String> {
-    Ok(tool_registry.permission_specs(None)?.into_iter().fold(
-        PermissionPolicy::new(mode).with_permission_rules(feature_config.permission_rules()),
-        |policy, (name, required_permission)| {
-            policy.with_tool_requirement(name, required_permission)
-        },
-    ))
 }
 
 fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
