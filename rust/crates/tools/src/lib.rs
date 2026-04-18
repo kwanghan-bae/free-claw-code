@@ -1,3 +1,20 @@
+//! Tools crate — built-in tool implementations and registry.
+//!
+//! Tool handlers are grouped into concept-specific submodules:
+//! - [`bash`] — shell execution + workspace-test branch preflight
+//! - [`browser`] — `WebFetch`/`WebSearch` and HTML parsing helpers
+//! - [`file`] — read/write/edit/glob/grep file tools
+//! - [`git`] — git ref and branch helpers
+//! - [`lsp`] — language-server dispatch
+//! - [`search`] — `ToolSearch` implementation (deferred-tool schema lookup)
+//! - [`lane_completion`], [`pdf_extract`] — standalone sibling modules
+//!
+//! Remaining symbols in `lib.rs` cover the registry scaffolding
+//! (`GlobalToolRegistry`, `ToolSpec`, `execute_tool`, dispatch map)
+//! and tool handlers that have not yet been split out (todo, skill,
+//! agent, notebook, powershell, config, cron, team, worker, mcp, etc.),
+//! alongside the provider-runtime plumbing and the tests module.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,28 +28,48 @@ use api::{
 use plugins::PluginTool;
 use reqwest::blocking::Client;
 use runtime::{
-    check_freshness, dedupe_superseded_commit_events, edit_file, execute_bash, glob_search,
-    grep_search, load_system_prompt,
+    dedupe_superseded_commit_events, load_system_prompt,
     lsp_client::LspRegistry,
     mcp_tool_bridge::McpToolRegistry,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
-    read_file,
     summary_compression::compress_summary_text,
     task_registry::TaskRegistry,
     team_cron_registry::{CronRegistry, TeamRegistry},
     worker_boot::{WorkerReadySnapshot, WorkerRegistry, WorkerTaskReceipt},
-    write_file, ApiClient, ApiRequest, AssistantEvent, BashCommandInput, BashCommandOutput,
-    BranchFreshness, ConfigLoader, ContentBlock, ConversationMessage, ConversationRuntime,
-    GrepSearchInput, LaneCommitProvenance, LaneEvent, LaneEventBlocker, LaneEventName,
-    LaneEventStatus, LaneFailureClass, McpDegradedReport, MessageRole, PermissionMode,
+    ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ConfigLoader, ContentBlock,
+    ConversationMessage, ConversationRuntime, GrepSearchInput, LaneCommitProvenance, LaneEvent,
+    LaneEventBlocker, LaneFailureClass, McpDegradedReport, MessageRole, PermissionMode,
     PermissionPolicy, PromptCacheEvent, ProviderFallbackConfig, RuntimeError, Session, TaskPacket,
     ToolError, ToolExecutor,
 };
+#[cfg(test)]
+use runtime::LaneEventName;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+pub mod bash;
+pub mod browser;
+pub mod file;
+pub mod git;
+pub mod lsp;
+pub mod search;
+
+pub(crate) use bash::{classify_bash_permission, run_bash, workspace_test_branch_preflight};
+pub(crate) use browser::{run_web_fetch, run_web_search, WebFetchInput, WebSearchInput};
+pub(crate) use file::{
+    run_edit_file, run_glob_search, run_grep_search, run_read_file, run_write_file, EditFileInput,
+    GlobSearchInputValue, ReadFileInput, WriteFileInput,
+};
+pub(crate) use git::{current_git_branch, extract_commit_sha};
+pub(crate) use lsp::{run_lsp, LspInput};
+pub(crate) use search::{
+    canonical_tool_token, deferred_tool_specs, normalize_tool_search_query, run_tool_search,
+    search_tool_specs, SearchableToolSpec, ToolSearchInput,
+};
+pub use search::ToolSearchOutput;
+
 /// Global task registry shared across tool invocations within a session.
-fn global_lsp_registry() -> &'static LspRegistry {
+pub(crate) fn global_lsp_registry() -> &'static LspRegistry {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<LspRegistry> = OnceLock::new();
     REGISTRY.get_or_init(LspRegistry::new)
@@ -1653,24 +1690,6 @@ fn run_cron_list(_input: Value) -> Result<String, String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_lsp(input: LspInput) -> Result<String, String> {
-    let registry = global_lsp_registry();
-    let action = &input.action;
-    let path = input.path.as_deref();
-    let line = input.line;
-    let character = input.character;
-    let query = input.query.as_deref();
-
-    match registry.dispatch(action, path, line, character, query) {
-        Ok(result) => to_pretty_json(result),
-        Err(e) => to_pretty_json(json!({
-            "action": action,
-            "error": e,
-            "status": "error"
-        })),
-    }
-}
-
 #[allow(clippy::needless_pass_by_value)]
 fn run_list_mcp_resources(input: McpResourceInput) -> Result<String, String> {
     let registry = global_mcp_registry();
@@ -1838,270 +1857,6 @@ fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> 
     serde_json::from_value(input.clone()).map_err(|error| error.to_string())
 }
 
-/// Classify bash command permission based on command type and path.
-/// ROADMAP #50: Read-only commands targeting CWD paths get `WorkspaceWrite`,
-/// all others remain `DangerFullAccess`.
-fn classify_bash_permission(command: &str) -> PermissionMode {
-    // Read-only commands that are safe when targeting workspace paths
-    const READ_ONLY_COMMANDS: &[&str] = &[
-        "cat", "head", "tail", "less", "more", "ls", "ll", "dir", "find", "test", "[", "[[",
-        "grep", "rg", "awk", "sed", "file", "stat", "readlink", "wc", "sort", "uniq", "cut", "tr",
-        "pwd", "echo", "printf",
-    ];
-
-    // Get the base command (first word before any args or pipes)
-    let base_cmd = command.split_whitespace().next().unwrap_or("");
-    let base_cmd = base_cmd.split('|').next().unwrap_or("").trim();
-    let base_cmd = base_cmd.split(';').next().unwrap_or("").trim();
-    let base_cmd = base_cmd.split('>').next().unwrap_or("").trim();
-    let base_cmd = base_cmd.split('<').next().unwrap_or("").trim();
-
-    // Check if it's a read-only command
-    let cmd_name = base_cmd.split('/').next_back().unwrap_or(base_cmd);
-    let is_read_only = READ_ONLY_COMMANDS.contains(&cmd_name);
-
-    if !is_read_only {
-        return PermissionMode::DangerFullAccess;
-    }
-
-    // Check if any path argument is outside workspace
-    // Simple heuristic: check for absolute paths not starting with CWD
-    if has_dangerous_paths(command) {
-        return PermissionMode::DangerFullAccess;
-    }
-
-    PermissionMode::WorkspaceWrite
-}
-
-/// Check if command has dangerous paths (outside workspace).
-fn has_dangerous_paths(command: &str) -> bool {
-    // Look for absolute paths
-    let tokens: Vec<&str> = command.split_whitespace().collect();
-
-    for token in tokens {
-        // Skip flags/options
-        if token.starts_with('-') {
-            continue;
-        }
-
-        // Check for absolute paths
-        if token.starts_with('/') || token.starts_with("~/") {
-            // Check if it's within CWD
-            let path =
-                PathBuf::from(token.replace('~', &std::env::var("HOME").unwrap_or_default()));
-            if let Ok(cwd) = std::env::current_dir() {
-                if !path.starts_with(&cwd) {
-                    return true; // Path outside workspace
-                }
-            }
-        }
-
-        // Check for parent directory traversal that escapes workspace
-        if token.contains("../..") || token.starts_with("../") && !token.starts_with("./") {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn run_bash(input: BashCommandInput) -> Result<String, String> {
-    if let Some(output) = workspace_test_branch_preflight(&input.command) {
-        return serde_json::to_string_pretty(&output).map_err(|error| error.to_string());
-    }
-    serde_json::to_string_pretty(&execute_bash(input).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())
-}
-
-fn workspace_test_branch_preflight(command: &str) -> Option<BashCommandOutput> {
-    if !is_workspace_test_command(command) {
-        return None;
-    }
-
-    let branch = git_stdout(&["branch", "--show-current"])?;
-    let main_ref = resolve_main_ref(&branch)?;
-    let freshness = check_freshness(&branch, &main_ref);
-    match freshness {
-        BranchFreshness::Fresh => None,
-        BranchFreshness::Stale {
-            commits_behind,
-            missing_fixes,
-        } => Some(branch_divergence_output(
-            command,
-            &branch,
-            &main_ref,
-            commits_behind,
-            None,
-            &missing_fixes,
-        )),
-        BranchFreshness::Diverged {
-            ahead,
-            behind,
-            missing_fixes,
-        } => Some(branch_divergence_output(
-            command,
-            &branch,
-            &main_ref,
-            behind,
-            Some(ahead),
-            &missing_fixes,
-        )),
-    }
-}
-
-fn is_workspace_test_command(command: &str) -> bool {
-    let normalized = normalize_shell_command(command);
-    [
-        "cargo test --workspace",
-        "cargo test --all",
-        "cargo nextest run --workspace",
-        "cargo nextest run --all",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle))
-}
-
-fn normalize_shell_command(command: &str) -> String {
-    command
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
-}
-
-fn resolve_main_ref(branch: &str) -> Option<String> {
-    let has_local_main = git_ref_exists("main");
-    let has_remote_main = git_ref_exists("origin/main");
-
-    if branch == "main" && has_remote_main {
-        Some("origin/main".to_string())
-    } else if has_local_main {
-        Some("main".to_string())
-    } else if has_remote_main {
-        Some("origin/main".to_string())
-    } else {
-        None
-    }
-}
-
-fn git_ref_exists(reference: &str) -> bool {
-    Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", reference])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn git_stdout(args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!stdout.is_empty()).then_some(stdout)
-}
-
-fn branch_divergence_output(
-    command: &str,
-    branch: &str,
-    main_ref: &str,
-    commits_behind: usize,
-    commits_ahead: Option<usize>,
-    missing_fixes: &[String],
-) -> BashCommandOutput {
-    let relation = commits_ahead.map_or_else(
-        || format!("is {commits_behind} commit(s) behind"),
-        |ahead| format!("has diverged ({ahead} ahead, {commits_behind} behind)"),
-    );
-    let missing_summary = if missing_fixes.is_empty() {
-        "(none surfaced)".to_string()
-    } else {
-        missing_fixes.join("; ")
-    };
-    let stderr = format!(
-        "branch divergence detected before workspace tests: `{branch}` {relation} `{main_ref}`. Missing commits: {missing_summary}. Merge or rebase `{main_ref}` before re-running `{command}`."
-    );
-
-    BashCommandOutput {
-        stdout: String::new(),
-        stderr: stderr.clone(),
-        raw_output_path: None,
-        interrupted: false,
-        is_image: None,
-        background_task_id: None,
-        backgrounded_by_user: None,
-        assistant_auto_backgrounded: None,
-        dangerously_disable_sandbox: None,
-        return_code_interpretation: Some("preflight_blocked:branch_divergence".to_string()),
-        no_output_expected: Some(false),
-        structured_content: Some(vec![serde_json::to_value(
-            LaneEvent::new(
-                LaneEventName::BranchStaleAgainstMain,
-                LaneEventStatus::Blocked,
-                iso8601_now(),
-            )
-            .with_failure_class(LaneFailureClass::BranchDivergence)
-            .with_detail(stderr.clone())
-            .with_data(json!({
-                "branch": branch,
-                "mainRef": main_ref,
-                "commitsBehind": commits_behind,
-                "commitsAhead": commits_ahead,
-                "missingCommits": missing_fixes,
-                "blockedCommand": command,
-                "recommendedAction": format!("merge or rebase {main_ref} before workspace tests")
-            })),
-        )
-        .expect("lane event should serialize")]),
-        persisted_output_path: None,
-        persisted_output_size: None,
-        sandbox_status: None,
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_read_file(input: ReadFileInput) -> Result<String, String> {
-    to_pretty_json(read_file(&input.path, input.offset, input.limit).map_err(io_to_string)?)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_write_file(input: WriteFileInput) -> Result<String, String> {
-    to_pretty_json(write_file(&input.path, &input.content).map_err(io_to_string)?)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_edit_file(input: EditFileInput) -> Result<String, String> {
-    to_pretty_json(
-        edit_file(
-            &input.path,
-            &input.old_string,
-            &input.new_string,
-            input.replace_all.unwrap_or(false),
-        )
-        .map_err(io_to_string)?,
-    )
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_glob_search(input: GlobSearchInputValue) -> Result<String, String> {
-    to_pretty_json(glob_search(&input.pattern, input.path.as_deref()).map_err(io_to_string)?)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_grep_search(input: GrepSearchInput) -> Result<String, String> {
-    to_pretty_json(grep_search(&input).map_err(io_to_string)?)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_web_fetch(input: WebFetchInput) -> Result<String, String> {
-    to_pretty_json(execute_web_fetch(&input)?)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_web_search(input: WebSearchInput) -> Result<String, String> {
-    to_pretty_json(execute_web_search(&input)?)
-}
-
 fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
     to_pretty_json(execute_todo_write(input)?)
 }
@@ -2112,10 +1867,6 @@ fn run_skill(input: SkillInput) -> Result<String, String> {
 
 fn run_agent(input: AgentInput) -> Result<String, String> {
     to_pretty_json(execute_agent(input)?)
-}
-
-fn run_tool_search(input: ToolSearchInput) -> Result<String, String> {
-    to_pretty_json(execute_tool_search(input))
 }
 
 fn run_notebook_edit(input: NotebookEditInput) -> Result<String, String> {
@@ -2226,53 +1977,13 @@ fn run_powershell(input: PowerShellInput) -> Result<String, String> {
     to_pretty_json(execute_powershell(input).map_err(|error| error.to_string())?)
 }
 
-fn to_pretty_json<T: serde::Serialize>(value: T) -> Result<String, String> {
+pub(crate) fn to_pretty_json<T: serde::Serialize>(value: T) -> Result<String, String> {
     serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn io_to_string(error: std::io::Error) -> String {
+pub(crate) fn io_to_string(error: std::io::Error) -> String {
     error.to_string()
-}
-
-#[derive(Debug, Deserialize)]
-struct ReadFileInput {
-    path: String,
-    offset: Option<usize>,
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WriteFileInput {
-    path: String,
-    content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct EditFileInput {
-    path: String,
-    old_string: String,
-    new_string: String,
-    replace_all: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GlobSearchInputValue {
-    pattern: String,
-    path: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WebFetchInput {
-    url: String,
-    prompt: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct WebSearchInput {
-    query: String,
-    allowed_domains: Option<Vec<String>>,
-    blocked_domains: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2309,12 +2020,6 @@ struct AgentInput {
     subagent_type: Option<String>,
     name: Option<String>,
     model: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ToolSearchInput {
-    query: String,
-    max_results: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2491,19 +2196,6 @@ struct CronDeleteInput {
 }
 
 #[derive(Debug, Deserialize)]
-struct LspInput {
-    action: String,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    line: Option<u32>,
-    #[serde(default)]
-    character: Option<u32>,
-    #[serde(default)]
-    query: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct McpResourceInput {
     #[serde(default)]
     server: Option<String>,
@@ -2538,26 +2230,6 @@ struct McpToolInput {
 #[derive(Debug, Deserialize)]
 struct TestingPermissionInput {
     action: String,
-}
-
-#[derive(Debug, Serialize)]
-struct WebFetchOutput {
-    bytes: usize,
-    code: u16,
-    #[serde(rename = "codeText")]
-    code_text: String,
-    result: String,
-    #[serde(rename = "durationMs")]
-    duration_ms: u128,
-    url: String,
-}
-
-#[derive(Debug, Serialize)]
-struct WebSearchOutput {
-    query: String,
-    results: Vec<WebSearchResultItem>,
-    #[serde(rename = "durationSeconds")]
-    duration_seconds: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -2615,19 +2287,6 @@ struct AgentJob {
     prompt: String,
     system_prompt: Vec<String>,
     allowed_tools: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ToolSearchOutput {
-    matches: Vec<String>,
-    query: String,
-    normalized_query: String,
-    #[serde(rename = "total_deferred_tools")]
-    total_deferred_tools: usize,
-    #[serde(rename = "pending_mcp_servers")]
-    pending_mcp_servers: Option<Vec<String>>,
-    #[serde(rename = "mcp_degraded", skip_serializing_if = "Option::is_none")]
-    mcp_degraded: Option<McpDegradedReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2705,12 +2364,6 @@ struct PlanModeOutput {
     current_local_mode: Option<Value>,
 }
 
-#[derive(Debug, Clone)]
-struct SearchableToolSpec {
-    name: String,
-    description: String,
-}
-
 #[derive(Debug, Serialize)]
 struct StructuredOutputResult {
     data: String,
@@ -2726,405 +2379,6 @@ struct ReplOutput {
     exit_code: i32,
     #[serde(rename = "durationMs")]
     duration_ms: u128,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
-enum WebSearchResultItem {
-    SearchResult {
-        tool_use_id: String,
-        content: Vec<SearchHit>,
-    },
-    Commentary(String),
-}
-
-#[derive(Debug, Serialize)]
-struct SearchHit {
-    title: String,
-    url: String,
-}
-
-fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
-    let started = Instant::now();
-    let client = build_http_client()?;
-    let request_url = normalize_fetch_url(&input.url)?;
-    let response = client
-        .get(request_url.clone())
-        .send()
-        .map_err(|error| error.to_string())?;
-
-    let status = response.status();
-    let final_url = response.url().to_string();
-    let code = status.as_u16();
-    let code_text = status.canonical_reason().unwrap_or("Unknown").to_string();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-    let body = response.text().map_err(|error| error.to_string())?;
-    let bytes = body.len();
-    let normalized = normalize_fetched_content(&body, &content_type);
-    let result = summarize_web_fetch(&final_url, &input.prompt, &normalized, &body, &content_type);
-
-    Ok(WebFetchOutput {
-        bytes,
-        code,
-        code_text,
-        result,
-        duration_ms: started.elapsed().as_millis(),
-        url: final_url,
-    })
-}
-
-fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String> {
-    let started = Instant::now();
-    let client = build_http_client()?;
-    let search_url = build_search_url(&input.query)?;
-    let response = client
-        .get(search_url)
-        .send()
-        .map_err(|error| error.to_string())?;
-
-    let final_url = response.url().clone();
-    let html = response.text().map_err(|error| error.to_string())?;
-    let mut hits = extract_search_hits(&html);
-
-    if hits.is_empty() && final_url.host_str().is_some() {
-        hits = extract_search_hits_from_generic_links(&html);
-    }
-
-    if let Some(allowed) = input.allowed_domains.as_ref() {
-        hits.retain(|hit| host_matches_list(&hit.url, allowed));
-    }
-    if let Some(blocked) = input.blocked_domains.as_ref() {
-        hits.retain(|hit| !host_matches_list(&hit.url, blocked));
-    }
-
-    dedupe_hits(&mut hits);
-    hits.truncate(8);
-
-    let summary = if hits.is_empty() {
-        format!("No web search results matched the query {:?}.", input.query)
-    } else {
-        let rendered_hits = hits
-            .iter()
-            .map(|hit| format!("- [{}]({})", hit.title, hit.url))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!(
-            "Search results for {:?}. Include a Sources section in the final answer.\n{}",
-            input.query, rendered_hits
-        )
-    };
-
-    Ok(WebSearchOutput {
-        query: input.query.clone(),
-        results: vec![
-            WebSearchResultItem::Commentary(summary),
-            WebSearchResultItem::SearchResult {
-                tool_use_id: String::from("web_search_1"),
-                content: hits,
-            },
-        ],
-        duration_seconds: started.elapsed().as_secs_f64(),
-    })
-}
-
-fn build_http_client() -> Result<Client, String> {
-    Client::builder()
-        .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .user_agent("clawd-rust-tools/0.1")
-        .build()
-        .map_err(|error| error.to_string())
-}
-
-fn normalize_fetch_url(url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(url).map_err(|error| error.to_string())?;
-    if parsed.scheme() == "http" {
-        let host = parsed.host_str().unwrap_or_default();
-        if host != "localhost" && host != "127.0.0.1" && host != "::1" {
-            let mut upgraded = parsed;
-            upgraded
-                .set_scheme("https")
-                .map_err(|()| String::from("failed to upgrade URL to https"))?;
-            return Ok(upgraded.to_string());
-        }
-    }
-    Ok(parsed.to_string())
-}
-
-fn build_search_url(query: &str) -> Result<reqwest::Url, String> {
-    if let Ok(base) = std::env::var("CLAWD_WEB_SEARCH_BASE_URL") {
-        let mut url = reqwest::Url::parse(&base).map_err(|error| error.to_string())?;
-        url.query_pairs_mut().append_pair("q", query);
-        return Ok(url);
-    }
-
-    let mut url = reqwest::Url::parse("https://html.duckduckgo.com/html/")
-        .map_err(|error| error.to_string())?;
-    url.query_pairs_mut().append_pair("q", query);
-    Ok(url)
-}
-
-fn normalize_fetched_content(body: &str, content_type: &str) -> String {
-    if content_type.contains("html") {
-        html_to_text(body)
-    } else {
-        body.trim().to_string()
-    }
-}
-
-fn summarize_web_fetch(
-    url: &str,
-    prompt: &str,
-    content: &str,
-    raw_body: &str,
-    content_type: &str,
-) -> String {
-    let lower_prompt = prompt.to_lowercase();
-    let compact = collapse_whitespace(content);
-
-    let detail = if lower_prompt.contains("title") {
-        extract_title(content, raw_body, content_type).map_or_else(
-            || preview_text(&compact, 600),
-            |title| format!("Title: {title}"),
-        )
-    } else if lower_prompt.contains("summary") || lower_prompt.contains("summarize") {
-        preview_text(&compact, 900)
-    } else {
-        let preview = preview_text(&compact, 900);
-        format!("Prompt: {prompt}\nContent preview:\n{preview}")
-    };
-
-    format!("Fetched {url}\n{detail}")
-}
-
-fn extract_title(content: &str, raw_body: &str, content_type: &str) -> Option<String> {
-    if content_type.contains("html") {
-        let lowered = raw_body.to_lowercase();
-        if let Some(start) = lowered.find("<title>") {
-            let after = start + "<title>".len();
-            if let Some(end_rel) = lowered[after..].find("</title>") {
-                let title =
-                    collapse_whitespace(&decode_html_entities(&raw_body[after..after + end_rel]));
-                if !title.is_empty() {
-                    return Some(title);
-                }
-            }
-        }
-    }
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-    None
-}
-
-fn html_to_text(html: &str) -> String {
-    let mut text = String::with_capacity(html.len());
-    let mut in_tag = false;
-    let mut previous_was_space = false;
-
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if in_tag => {}
-            '&' => {
-                text.push('&');
-                previous_was_space = false;
-            }
-            ch if ch.is_whitespace() => {
-                if !previous_was_space {
-                    text.push(' ');
-                    previous_was_space = true;
-                }
-            }
-            _ => {
-                text.push(ch);
-                previous_was_space = false;
-            }
-        }
-    }
-
-    collapse_whitespace(&decode_html_entities(&text))
-}
-
-fn decode_html_entities(input: &str) -> String {
-    input
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
-}
-
-fn collapse_whitespace(input: &str) -> String {
-    input.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn preview_text(input: &str, max_chars: usize) -> String {
-    if input.chars().count() <= max_chars {
-        return input.to_string();
-    }
-    let shortened = input.chars().take(max_chars).collect::<String>();
-    format!("{}…", shortened.trim_end())
-}
-
-fn extract_search_hits(html: &str) -> Vec<SearchHit> {
-    let mut hits = Vec::new();
-    let mut remaining = html;
-
-    while let Some(anchor_start) = remaining.find("result__a") {
-        let after_class = &remaining[anchor_start..];
-        let Some(href_idx) = after_class.find("href=") else {
-            remaining = &after_class[1..];
-            continue;
-        };
-        let href_slice = &after_class[href_idx + 5..];
-        let Some((url, rest)) = extract_quoted_value(href_slice) else {
-            remaining = &after_class[1..];
-            continue;
-        };
-        let Some(close_tag_idx) = rest.find('>') else {
-            remaining = &after_class[1..];
-            continue;
-        };
-        let after_tag = &rest[close_tag_idx + 1..];
-        let Some(end_anchor_idx) = after_tag.find("</a>") else {
-            remaining = &after_tag[1..];
-            continue;
-        };
-        let title = html_to_text(&after_tag[..end_anchor_idx]);
-        if let Some(decoded_url) = decode_duckduckgo_redirect(&url) {
-            hits.push(SearchHit {
-                title: title.trim().to_string(),
-                url: decoded_url,
-            });
-        }
-        remaining = &after_tag[end_anchor_idx + 4..];
-    }
-
-    hits
-}
-
-fn extract_search_hits_from_generic_links(html: &str) -> Vec<SearchHit> {
-    let mut hits = Vec::new();
-    let mut remaining = html;
-
-    while let Some(anchor_start) = remaining.find("<a") {
-        let after_anchor = &remaining[anchor_start..];
-        let Some(href_idx) = after_anchor.find("href=") else {
-            remaining = &after_anchor[2..];
-            continue;
-        };
-        let href_slice = &after_anchor[href_idx + 5..];
-        let Some((url, rest)) = extract_quoted_value(href_slice) else {
-            remaining = &after_anchor[2..];
-            continue;
-        };
-        let Some(close_tag_idx) = rest.find('>') else {
-            remaining = &after_anchor[2..];
-            continue;
-        };
-        let after_tag = &rest[close_tag_idx + 1..];
-        let Some(end_anchor_idx) = after_tag.find("</a>") else {
-            remaining = &after_anchor[2..];
-            continue;
-        };
-        let title = html_to_text(&after_tag[..end_anchor_idx]);
-        if title.trim().is_empty() {
-            remaining = &after_tag[end_anchor_idx + 4..];
-            continue;
-        }
-        let decoded_url = decode_duckduckgo_redirect(&url).unwrap_or(url);
-        if decoded_url.starts_with("http://") || decoded_url.starts_with("https://") {
-            hits.push(SearchHit {
-                title: title.trim().to_string(),
-                url: decoded_url,
-            });
-        }
-        remaining = &after_tag[end_anchor_idx + 4..];
-    }
-
-    hits
-}
-
-fn extract_quoted_value(input: &str) -> Option<(String, &str)> {
-    let quote = input.chars().next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
-    }
-    let rest = &input[quote.len_utf8()..];
-    let end = rest.find(quote)?;
-    Some((rest[..end].to_string(), &rest[end + quote.len_utf8()..]))
-}
-
-fn decode_duckduckgo_redirect(url: &str) -> Option<String> {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        return Some(html_entity_decode_url(url));
-    }
-
-    let joined = if url.starts_with("//") {
-        format!("https:{url}")
-    } else if url.starts_with('/') {
-        format!("https://duckduckgo.com{url}")
-    } else {
-        return None;
-    };
-
-    let parsed = reqwest::Url::parse(&joined).ok()?;
-    if parsed.path() == "/l/" || parsed.path() == "/l" {
-        for (key, value) in parsed.query_pairs() {
-            if key == "uddg" {
-                return Some(html_entity_decode_url(value.as_ref()));
-            }
-        }
-    }
-    Some(joined)
-}
-
-fn html_entity_decode_url(url: &str) -> String {
-    decode_html_entities(url)
-}
-
-fn host_matches_list(url: &str, domains: &[String]) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return false;
-    };
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
-    let host = host.to_ascii_lowercase();
-    domains.iter().any(|domain| {
-        let normalized = normalize_domain_filter(domain);
-        !normalized.is_empty() && (host == normalized || host.ends_with(&format!(".{normalized}")))
-    })
-}
-
-fn normalize_domain_filter(domain: &str) -> String {
-    let trimmed = domain.trim();
-    let candidate = reqwest::Url::parse(trimmed)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .unwrap_or_else(|| trimmed.to_string());
-    candidate
-        .trim()
-        .trim_start_matches('.')
-        .trim_end_matches('/')
-        .to_ascii_lowercase()
-}
-
-fn dedupe_hits(hits: &mut Vec<SearchHit>) {
-    let mut seen = BTreeSet::new();
-    hits.retain(|hit| seen.insert(hit.url.clone()));
 }
 
 fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> {
@@ -4400,24 +3654,6 @@ fn maybe_commit_provenance(result: Option<&str>) -> Option<LaneCommitProvenance>
     })
 }
 
-fn extract_commit_sha(result: &str) -> Option<String> {
-    result
-        .split(|c: char| !c.is_ascii_hexdigit())
-        .find(|token| token.len() >= 7 && token.len() <= 40)
-        .map(str::to_string)
-}
-
-fn current_git_branch() -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 fn append_agent_output(path: &str, suffix: &str) -> Result<(), String> {
     use std::io::Write as _;
 
@@ -4901,130 +4137,6 @@ fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
         .unwrap_or_default()
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn execute_tool_search(input: ToolSearchInput) -> ToolSearchOutput {
-    GlobalToolRegistry::builtin().search(&input.query, input.max_results.unwrap_or(5), None, None)
-}
-
-fn deferred_tool_specs() -> Vec<ToolSpec> {
-    mvp_tool_specs()
-        .into_iter()
-        .filter(|spec| {
-            !matches!(
-                spec.name,
-                "bash" | "read_file" | "write_file" | "edit_file" | "glob_search" | "grep_search"
-            )
-        })
-        .collect()
-}
-
-fn search_tool_specs(query: &str, max_results: usize, specs: &[SearchableToolSpec]) -> Vec<String> {
-    let lowered = query.to_lowercase();
-    if let Some(selection) = lowered.strip_prefix("select:") {
-        return selection
-            .split(',')
-            .map(str::trim)
-            .filter(|part| !part.is_empty())
-            .filter_map(|wanted| {
-                let wanted = canonical_tool_token(wanted);
-                specs
-                    .iter()
-                    .find(|spec| canonical_tool_token(&spec.name) == wanted)
-                    .map(|spec| spec.name.clone())
-            })
-            .take(max_results)
-            .collect();
-    }
-
-    let mut required = Vec::new();
-    let mut optional = Vec::new();
-    for term in lowered.split_whitespace() {
-        if let Some(rest) = term.strip_prefix('+') {
-            if !rest.is_empty() {
-                required.push(rest);
-            }
-        } else {
-            optional.push(term);
-        }
-    }
-    let terms = if required.is_empty() {
-        optional.clone()
-    } else {
-        required.iter().chain(optional.iter()).copied().collect()
-    };
-
-    let mut scored = specs
-        .iter()
-        .filter_map(|spec| {
-            let name = spec.name.to_lowercase();
-            let canonical_name = canonical_tool_token(&spec.name);
-            let normalized_description = normalize_tool_search_query(&spec.description);
-            let haystack = format!(
-                "{name} {} {canonical_name}",
-                spec.description.to_lowercase()
-            );
-            let normalized_haystack = format!("{canonical_name} {normalized_description}");
-            if required.iter().any(|term| !haystack.contains(term)) {
-                return None;
-            }
-
-            let mut score = 0_i32;
-            for term in &terms {
-                let canonical_term = canonical_tool_token(term);
-                if haystack.contains(term) {
-                    score += 2;
-                }
-                if name == *term {
-                    score += 8;
-                }
-                if name.contains(term) {
-                    score += 4;
-                }
-                if canonical_name == canonical_term {
-                    score += 12;
-                }
-                if normalized_haystack.contains(&canonical_term) {
-                    score += 3;
-                }
-            }
-
-            if score == 0 && !lowered.is_empty() {
-                return None;
-            }
-            Some((score, spec.name.clone()))
-        })
-        .collect::<Vec<_>>();
-
-    scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-    scored
-        .into_iter()
-        .map(|(_, name)| name)
-        .take(max_results)
-        .collect()
-}
-
-fn normalize_tool_search_query(query: &str) -> String {
-    query
-        .trim()
-        .split(|ch: char| ch.is_whitespace() || ch == ',')
-        .filter(|term| !term.is_empty())
-        .map(canonical_tool_token)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn canonical_tool_token(value: &str) -> String {
-    let mut canonical = value
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    if let Some(stripped) = canonical.strip_suffix("tool") {
-        canonical = stripped.to_string();
-    }
-    canonical
-}
-
 fn agent_store_dir() -> Result<std::path::PathBuf, String> {
     if let Ok(path) = std::env::var("CLAWD_AGENT_STORE") {
         return Ok(std::path::PathBuf::from(path));
@@ -5080,7 +4192,7 @@ fn normalize_subagent_type(subagent_type: Option<&str>) -> String {
     }
 }
 
-fn iso8601_now() -> String {
+pub(crate) fn iso8601_now() -> String {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

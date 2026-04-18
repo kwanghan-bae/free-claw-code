@@ -4,6 +4,7 @@
 //! MCP plumbing, tool-facing file operations, and the core conversation loop
 //! that drives interactive and one-shot turns.
 
+pub mod backpressure_server;
 mod bash;
 pub mod bash_validation;
 mod bootstrap;

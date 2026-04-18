@@ -4,6 +4,8 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub mod cron;
+
 use plugins::{PluginError, PluginLoadFailure, PluginManager, PluginSummary};
 use runtime::{
     compact_session, CompactionConfig, ConfigLoader, ConfigSource, McpOAuthConfig, McpServerConfig,
