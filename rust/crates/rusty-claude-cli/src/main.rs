@@ -14,6 +14,7 @@ mod input;
 mod output_format;
 mod permissions_runtime;
 mod render;
+mod session_lifecycle;
 
 #[cfg(test)]
 use command_dispatch::format_unknown_slash_command_message;
@@ -34,6 +35,15 @@ use permissions_runtime::{
     enforce_broad_cwd_policy, normalize_permission_mode, parse_permission_mode_arg,
     permission_mode_for_mcp_tool, permission_mode_from_label, permission_mode_from_resolved,
     permission_policy,
+};
+use session_lifecycle::{
+    confirm_session_deletion, create_managed_session_handle, delete_managed_session,
+    latest_managed_session, list_managed_sessions, load_session_reference, new_cli_session,
+    render_repl_help, render_session_list, resolve_managed_session_path, resolve_session_reference,
+    resume_session, run_resume_command, session_clear_backup_path, sessions_dir,
+    slash_command_completion_candidates_with_sessions, try_resolve_bare_skill_prompt,
+    write_session_clear_backup, ManagedSessionSummary, ResumeCommandOutcome, SessionHandle,
+    STUB_COMMANDS,
 };
 
 use std::collections::BTreeSet;
@@ -785,22 +795,6 @@ fn removed_auth_surface_error(command_name: &str) -> String {
     )
 }
 
-fn try_resolve_bare_skill_prompt(cwd: &Path, trimmed: &str) -> Option<String> {
-    let bare_first_token = trimmed.split_whitespace().next().unwrap_or_default();
-    let looks_like_skill_name = !bare_first_token.is_empty()
-        && !bare_first_token.starts_with('/')
-        && bare_first_token
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
-    if !looks_like_skill_name {
-        return None;
-    }
-    match resolve_skill_invocation(cwd, Some(trimmed)) {
-        Ok(SkillSlashDispatch::Invoke(prompt)) => Some(prompt),
-        _ => None,
-    }
-}
-
 fn join_optional_args(args: &[String]) -> Option<String> {
     let joined = args.join(" ");
     let trimmed = joined.trim();
@@ -879,7 +873,7 @@ fn format_unknown_option(option: &str) -> String {
     message
 }
 
-fn resolve_model_alias(model: &str) -> &str {
+pub(crate) fn resolve_model_alias(model: &str) -> &str {
     match model {
         "opus" => "claude-opus-4-6",
         "sonnet" => "claude-sonnet-4-6",
@@ -1216,7 +1210,7 @@ impl DiagnosticCheck {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DoctorReport {
+pub(crate) struct DoctorReport {
     checks: Vec<DiagnosticCheck>,
 }
 
@@ -1242,7 +1236,7 @@ impl DoctorReport {
         self.checks.iter().any(|check| check.level.is_failure())
     }
 
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         let (ok_count, warn_count, fail_count) = self.counts();
         let mut lines = vec![
             "Doctor".to_string(),
@@ -1254,7 +1248,7 @@ impl DoctorReport {
         lines.join("\n\n")
     }
 
-    fn json_value(&self) -> Value {
+    pub(crate) fn json_value(&self) -> Value {
         let report = self.render();
         let (ok_count, warn_count, fail_count) = self.counts();
         json!({
@@ -1291,7 +1285,7 @@ fn render_diagnostic_check(check: &DiagnosticCheck) -> String {
     lines.join("\n")
 }
 
-fn render_doctor_report() -> Result<DoctorReport, Box<dyn std::error::Error>> {
+pub(crate) fn render_doctor_report() -> Result<DoctorReport, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let config_loader = ConfigLoader::default_for(&cwd);
     let config = config_loader.load();
@@ -1967,7 +1961,7 @@ fn print_version(output_format: CliOutputFormat) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-fn version_json_value() -> serde_json::Value {
+pub(crate) fn version_json_value() -> serde_json::Value {
     json!({
         "kind": "version",
         "message": render_version_report(),
@@ -1977,196 +1971,44 @@ fn version_json_value() -> serde_json::Value {
     })
 }
 
-#[allow(clippy::too_many_lines)]
-fn resume_session(session_path: &Path, commands: &[String], output_format: CliOutputFormat) {
-    let session_reference = session_path.display().to_string();
-    let (handle, session) = match load_session_reference(&session_reference) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            if output_format == CliOutputFormat::Json {
-                eprintln!(
-                    "{}",
-                    serde_json::json!({
-                        "type": "error",
-                        "error": format!("failed to restore session: {error}"),
-                    })
-                );
-            } else {
-                eprintln!("failed to restore session: {error}");
-            }
-            std::process::exit(1);
-        }
-    };
-    let resolved_path = handle.path.clone();
-
-    if commands.is_empty() {
-        if output_format == CliOutputFormat::Json {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "kind": "restored",
-                    "session_id": session.session_id,
-                    "path": handle.path.display().to_string(),
-                    "message_count": session.messages.len(),
-                })
-            );
-        } else {
-            println!(
-                "Restored session from {} ({} messages).",
-                handle.path.display(),
-                session.messages.len()
-            );
-        }
-        return;
-    }
-
-    let mut session = session;
-    for raw_command in commands {
-        // Intercept spec commands that have no parse arm before calling
-        // SlashCommand::parse — they return Err(SlashCommandParseError) which
-        // formats as the confusing circular "Did you mean /X?" message.
-        // STUB_COMMANDS covers both completions-filtered stubs and parse-less
-        // spec entries; treat both as unsupported in resume mode.
-        {
-            let cmd_root = raw_command
-                .trim_start_matches('/')
-                .split_whitespace()
-                .next()
-                .unwrap_or("");
-            if STUB_COMMANDS.contains(&cmd_root) {
-                if output_format == CliOutputFormat::Json {
-                    eprintln!(
-                        "{}",
-                        serde_json::json!({
-                            "type": "error",
-                            "error": format!("/{cmd_root} is not yet implemented in this build"),
-                            "command": raw_command,
-                        })
-                    );
-                } else {
-                    eprintln!("/{cmd_root} is not yet implemented in this build");
-                }
-                std::process::exit(2);
-            }
-        }
-        let command = match SlashCommand::parse(raw_command) {
-            Ok(Some(command)) => command,
-            Ok(None) => {
-                if output_format == CliOutputFormat::Json {
-                    eprintln!(
-                        "{}",
-                        serde_json::json!({
-                            "type": "error",
-                            "error": format!("unsupported resumed command: {raw_command}"),
-                            "command": raw_command,
-                        })
-                    );
-                } else {
-                    eprintln!("unsupported resumed command: {raw_command}");
-                }
-                std::process::exit(2);
-            }
-            Err(error) => {
-                if output_format == CliOutputFormat::Json {
-                    eprintln!(
-                        "{}",
-                        serde_json::json!({
-                            "type": "error",
-                            "error": error.to_string(),
-                            "command": raw_command,
-                        })
-                    );
-                } else {
-                    eprintln!("{error}");
-                }
-                std::process::exit(2);
-            }
-        };
-        match run_resume_command(&resolved_path, &session, &command) {
-            Ok(ResumeCommandOutcome {
-                session: next_session,
-                message,
-                json,
-            }) => {
-                session = next_session;
-                if output_format == CliOutputFormat::Json {
-                    if let Some(value) = json {
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&value)
-                                .expect("resume command json output")
-                        );
-                    } else if let Some(message) = message {
-                        println!("{message}");
-                    }
-                } else if let Some(message) = message {
-                    println!("{message}");
-                }
-            }
-            Err(error) => {
-                if output_format == CliOutputFormat::Json {
-                    eprintln!(
-                        "{}",
-                        serde_json::json!({
-                            "type": "error",
-                            "error": error.to_string(),
-                            "command": raw_command,
-                        })
-                    );
-                } else {
-                    eprintln!("{error}");
-                }
-                std::process::exit(2);
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
-struct ResumeCommandOutcome {
-    session: Session,
-    message: Option<String>,
-    json: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone)]
-struct StatusContext {
-    cwd: PathBuf,
-    session_path: Option<PathBuf>,
-    loaded_config_files: usize,
-    discovered_config_files: usize,
-    memory_file_count: usize,
-    project_root: Option<PathBuf>,
-    git_branch: Option<String>,
-    git_summary: GitWorkspaceSummary,
-    sandbox_status: runtime::SandboxStatus,
+pub(crate) struct StatusContext {
+    pub(crate) cwd: PathBuf,
+    pub(crate) session_path: Option<PathBuf>,
+    pub(crate) loaded_config_files: usize,
+    pub(crate) discovered_config_files: usize,
+    pub(crate) memory_file_count: usize,
+    pub(crate) project_root: Option<PathBuf>,
+    pub(crate) git_branch: Option<String>,
+    pub(crate) git_summary: GitWorkspaceSummary,
+    pub(crate) sandbox_status: runtime::SandboxStatus,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct StatusUsage {
-    message_count: usize,
-    turns: u32,
-    latest: TokenUsage,
-    cumulative: TokenUsage,
-    estimated_tokens: usize,
+pub(crate) struct StatusUsage {
+    pub(crate) message_count: usize,
+    pub(crate) turns: u32,
+    pub(crate) latest: TokenUsage,
+    pub(crate) cumulative: TokenUsage,
+    pub(crate) estimated_tokens: usize,
 }
 
 #[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct GitWorkspaceSummary {
-    changed_files: usize,
-    staged_files: usize,
-    unstaged_files: usize,
-    untracked_files: usize,
-    conflicted_files: usize,
+pub(crate) struct GitWorkspaceSummary {
+    pub(crate) changed_files: usize,
+    pub(crate) staged_files: usize,
+    pub(crate) unstaged_files: usize,
+    pub(crate) untracked_files: usize,
+    pub(crate) conflicted_files: usize,
 }
 
 impl GitWorkspaceSummary {
-    fn is_clean(self) -> bool {
+    pub(crate) fn is_clean(self) -> bool {
         self.changed_files == 0
     }
 
-    fn headline(self) -> String {
+    pub(crate) fn headline(self) -> String {
         if self.is_clean() {
             "clean".to_string()
         } else {
@@ -2306,343 +2148,6 @@ fn parse_git_status_metadata_for(
     (project_root, branch)
 }
 
-#[allow(clippy::too_many_lines)]
-fn run_resume_command(
-    session_path: &Path,
-    session: &Session,
-    command: &SlashCommand,
-) -> Result<ResumeCommandOutcome, Box<dyn std::error::Error>> {
-    match command {
-        SlashCommand::Help => Ok(ResumeCommandOutcome {
-            session: session.clone(),
-            message: Some(render_repl_help()),
-            json: Some(serde_json::json!({ "kind": "help", "text": render_repl_help() })),
-        }),
-        SlashCommand::Compact => {
-            let result = runtime::compact_session(
-                session,
-                CompactionConfig {
-                    max_estimated_tokens: 0,
-                    ..CompactionConfig::default()
-                },
-            );
-            let removed = result.removed_message_count;
-            let kept = result.compacted_session.messages.len();
-            let skipped = removed == 0;
-            result.compacted_session.save_to_path(session_path)?;
-            Ok(ResumeCommandOutcome {
-                session: result.compacted_session,
-                message: Some(format_compact_report(removed, kept, skipped)),
-                json: Some(serde_json::json!({
-                    "kind": "compact",
-                    "skipped": skipped,
-                    "removed_messages": removed,
-                    "kept_messages": kept,
-                })),
-            })
-        }
-        SlashCommand::Clear { confirm } => {
-            if !confirm {
-                return Ok(ResumeCommandOutcome {
-                    session: session.clone(),
-                    message: Some(
-                        "clear: confirmation required; rerun with /clear --confirm".to_string(),
-                    ),
-                    json: Some(serde_json::json!({
-                        "kind": "error",
-                        "error": "confirmation required",
-                        "hint": "rerun with /clear --confirm",
-                    })),
-                });
-            }
-            let backup_path = write_session_clear_backup(session, session_path)?;
-            let previous_session_id = session.session_id.clone();
-            let cleared = new_cli_session()?;
-            let new_session_id = cleared.session_id.clone();
-            cleared.save_to_path(session_path)?;
-            Ok(ResumeCommandOutcome {
-                session: cleared,
-                message: Some(format!(
-                    "Session cleared\n  Mode             resumed session reset\n  Previous session {previous_session_id}\n  Backup           {}\n  Resume previous  claw --resume {}\n  New session      {new_session_id}\n  Session file     {}",
-                    backup_path.display(),
-                    backup_path.display(),
-                    session_path.display()
-                )),
-                json: Some(serde_json::json!({
-                    "kind": "clear",
-                    "previous_session_id": previous_session_id,
-                    "new_session_id": new_session_id,
-                    "backup": backup_path.display().to_string(),
-                    "session_file": session_path.display().to_string(),
-                })),
-            })
-        }
-        SlashCommand::Status => {
-            let tracker = UsageTracker::from_session(session);
-            let usage = tracker.cumulative_usage();
-            let context = status_context(Some(session_path))?;
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(format_status_report(
-                    session.model.as_deref().unwrap_or("restored-session"),
-                    StatusUsage {
-                        message_count: session.messages.len(),
-                        turns: tracker.turns(),
-                        latest: tracker.current_turn_usage(),
-                        cumulative: usage,
-                        estimated_tokens: 0,
-                    },
-                    default_permission_mode().as_str(),
-                    &context,
-                )),
-                json: Some(status_json_value(
-                    session.model.as_deref(),
-                    StatusUsage {
-                        message_count: session.messages.len(),
-                        turns: tracker.turns(),
-                        latest: tracker.current_turn_usage(),
-                        cumulative: usage,
-                        estimated_tokens: 0,
-                    },
-                    default_permission_mode().as_str(),
-                    &context,
-                )),
-            })
-        }
-        SlashCommand::Sandbox => {
-            let cwd = env::current_dir()?;
-            let loader = ConfigLoader::default_for(&cwd);
-            let runtime_config = loader.load()?;
-            let status = resolve_sandbox_status(runtime_config.sandbox(), &cwd);
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(format_sandbox_report(&status)),
-                json: Some(sandbox_json_value(&status)),
-            })
-        }
-        SlashCommand::Cost => {
-            let usage = UsageTracker::from_session(session).cumulative_usage();
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(format_cost_report(usage)),
-                json: Some(serde_json::json!({
-                    "kind": "cost",
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "cache_creation_input_tokens": usage.cache_creation_input_tokens,
-                    "cache_read_input_tokens": usage.cache_read_input_tokens,
-                    "total_tokens": usage.total_tokens(),
-                })),
-            })
-        }
-        SlashCommand::Config { section } => {
-            let message = render_config_report(section.as_deref())?;
-            let json = render_config_json(section.as_deref())?;
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(message),
-                json: Some(json),
-            })
-        }
-        SlashCommand::Mcp { action, target } => {
-            let cwd = env::current_dir()?;
-            let args = match (action.as_deref(), target.as_deref()) {
-                (None, None) => None,
-                (Some(action), None) => Some(action.to_string()),
-                (Some(action), Some(target)) => Some(format!("{action} {target}")),
-                (None, Some(target)) => Some(target.to_string()),
-            };
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(handle_mcp_slash_command(args.as_deref(), &cwd)?),
-                json: Some(handle_mcp_slash_command_json(args.as_deref(), &cwd)?),
-            })
-        }
-        SlashCommand::Memory => Ok(ResumeCommandOutcome {
-            session: session.clone(),
-            message: Some(render_memory_report()?),
-            json: Some(render_memory_json()?),
-        }),
-        SlashCommand::Init => {
-            let message = init_claude_md()?;
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(message.clone()),
-                json: Some(init_json_value(&message)),
-            })
-        }
-        SlashCommand::Diff => {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let message = render_diff_report_for(&cwd)?;
-            let json = render_diff_json_for(&cwd)?;
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(message),
-                json: Some(json),
-            })
-        }
-        SlashCommand::Version => Ok(ResumeCommandOutcome {
-            session: session.clone(),
-            message: Some(render_version_report()),
-            json: Some(version_json_value()),
-        }),
-        SlashCommand::Export { path } => {
-            let export_path = resolve_export_path(path.as_deref(), session)?;
-            fs::write(&export_path, render_export_text(session))?;
-            let msg_count = session.messages.len();
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(format!(
-                    "Export\n  Result           wrote transcript\n  File             {}\n  Messages         {}",
-                    export_path.display(),
-                    msg_count,
-                )),
-                json: Some(serde_json::json!({
-                    "kind": "export",
-                    "file": export_path.display().to_string(),
-                    "message_count": msg_count,
-                })),
-            })
-        }
-        SlashCommand::Agents { args } => {
-            let cwd = env::current_dir()?;
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(handle_agents_slash_command(args.as_deref(), &cwd)?),
-                json: Some(serde_json::json!({
-                    "kind": "agents",
-                    "text": handle_agents_slash_command(args.as_deref(), &cwd)?,
-                })),
-            })
-        }
-        SlashCommand::Skills { args } => {
-            if let SkillSlashDispatch::Invoke(_) = classify_skills_slash_command(args.as_deref()) {
-                return Err(
-                    "resumed /skills invocations are interactive-only; start `claw` and run `/skills <skill>` in the REPL".into(),
-                );
-            }
-            let cwd = env::current_dir()?;
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(handle_skills_slash_command(args.as_deref(), &cwd)?),
-                json: Some(handle_skills_slash_command_json(args.as_deref(), &cwd)?),
-            })
-        }
-        SlashCommand::Doctor => {
-            let report = render_doctor_report()?;
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(report.render()),
-                json: Some(report.json_value()),
-            })
-        }
-        SlashCommand::Stats => {
-            let usage = UsageTracker::from_session(session).cumulative_usage();
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(format_cost_report(usage)),
-                json: Some(serde_json::json!({
-                    "kind": "stats",
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "cache_creation_input_tokens": usage.cache_creation_input_tokens,
-                    "cache_read_input_tokens": usage.cache_read_input_tokens,
-                    "total_tokens": usage.total_tokens(),
-                })),
-            })
-        }
-        SlashCommand::History { count } => {
-            let limit = parse_history_count(count.as_deref())
-                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
-            let entries = collect_session_prompt_history(session);
-            let shown: Vec<_> = entries.iter().rev().take(limit).rev().collect();
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(render_prompt_history_report(&entries, limit)),
-                json: Some(serde_json::json!({
-                    "kind": "history",
-                    "total": entries.len(),
-                    "showing": shown.len(),
-                    "entries": shown.iter().map(|e| serde_json::json!({
-                        "timestamp_ms": e.timestamp_ms,
-                        "text": e.text,
-                    })).collect::<Vec<_>>(),
-                })),
-            })
-        }
-        SlashCommand::Unknown(name) => Err(format_unknown_slash_command(name).into()),
-        // /session list can be served from the sessions directory without a live session.
-        SlashCommand::Session {
-            action: Some(ref act),
-            ..
-        } if act == "list" => {
-            let sessions = list_managed_sessions().unwrap_or_default();
-            let session_ids: Vec<String> = sessions.iter().map(|s| s.id.clone()).collect();
-            let active_id = session.session_id.clone();
-            let text = render_session_list(&active_id).unwrap_or_else(|e| format!("error: {e}"));
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(text),
-                json: Some(serde_json::json!({
-                    "kind": "session_list",
-                    "sessions": session_ids,
-                    "active": active_id,
-                })),
-            })
-        }
-        SlashCommand::Bughunter { .. }
-        | SlashCommand::Commit { .. }
-        | SlashCommand::Pr { .. }
-        | SlashCommand::Issue { .. }
-        | SlashCommand::Ultraplan { .. }
-        | SlashCommand::Teleport { .. }
-        | SlashCommand::DebugToolCall { .. }
-        | SlashCommand::Resume { .. }
-        | SlashCommand::Model { .. }
-        | SlashCommand::Permissions { .. }
-        | SlashCommand::Session { .. }
-        | SlashCommand::Plugins { .. }
-        | SlashCommand::Login
-        | SlashCommand::Logout
-        | SlashCommand::Vim
-        | SlashCommand::Upgrade
-        | SlashCommand::Share
-        | SlashCommand::Feedback
-        | SlashCommand::Files
-        | SlashCommand::Fast
-        | SlashCommand::Exit
-        | SlashCommand::Summary
-        | SlashCommand::Desktop
-        | SlashCommand::Brief
-        | SlashCommand::Advisor
-        | SlashCommand::Stickers
-        | SlashCommand::Insights
-        | SlashCommand::Thinkback
-        | SlashCommand::ReleaseNotes
-        | SlashCommand::SecurityReview
-        | SlashCommand::Keybindings
-        | SlashCommand::PrivacySettings
-        | SlashCommand::Plan { .. }
-        | SlashCommand::Review { .. }
-        | SlashCommand::Tasks { .. }
-        | SlashCommand::Theme { .. }
-        | SlashCommand::Voice { .. }
-        | SlashCommand::Usage { .. }
-        | SlashCommand::Rename { .. }
-        | SlashCommand::Copy { .. }
-        | SlashCommand::Hooks { .. }
-        | SlashCommand::Context { .. }
-        | SlashCommand::Color { .. }
-        | SlashCommand::Effort { .. }
-        | SlashCommand::Branch { .. }
-        | SlashCommand::Rewind { .. }
-        | SlashCommand::Ide { .. }
-        | SlashCommand::Tag { .. }
-        | SlashCommand::OutputStyle { .. }
-        | SlashCommand::AddDir { .. } => Err("unsupported resumed slash command".into()),
-    }
-}
-
 fn run_stale_base_preflight(flag_value: Option<&str>) {
     let Ok(cwd) = env::current_dir() else {
         return;
@@ -2721,23 +2226,6 @@ fn run_repl(
     }
 
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct SessionHandle {
-    id: String,
-    path: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-struct ManagedSessionSummary {
-    id: String,
-    path: PathBuf,
-    updated_at_ms: u64,
-    modified_epoch_millis: u128,
-    message_count: usize,
-    parent_session_id: Option<String>,
-    branch_name: Option<String>,
 }
 
 struct LiveCli {
@@ -4254,211 +3742,6 @@ impl LiveCli {
     }
 }
 
-fn sessions_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    Ok(current_session_store()?.sessions_dir().to_path_buf())
-}
-
-fn current_session_store() -> Result<runtime::SessionStore, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
-    runtime::SessionStore::from_cwd(&cwd).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-}
-
-fn new_cli_session() -> Result<Session, Box<dyn std::error::Error>> {
-    Ok(Session::new().with_workspace_root(env::current_dir()?))
-}
-
-fn create_managed_session_handle(
-    session_id: &str,
-) -> Result<SessionHandle, Box<dyn std::error::Error>> {
-    let handle = current_session_store()?.create_handle(session_id);
-    Ok(SessionHandle {
-        id: handle.id,
-        path: handle.path,
-    })
-}
-
-fn resolve_session_reference(reference: &str) -> Result<SessionHandle, Box<dyn std::error::Error>> {
-    let handle = current_session_store()?
-        .resolve_reference(reference)
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-    Ok(SessionHandle {
-        id: handle.id,
-        path: handle.path,
-    })
-}
-
-fn resolve_managed_session_path(session_id: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    current_session_store()?
-        .resolve_managed_path(session_id)
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-}
-
-fn list_managed_sessions() -> Result<Vec<ManagedSessionSummary>, Box<dyn std::error::Error>> {
-    Ok(current_session_store()?
-        .list_sessions()
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
-        .into_iter()
-        .map(|session| ManagedSessionSummary {
-            id: session.id,
-            path: session.path,
-            updated_at_ms: session.updated_at_ms,
-            modified_epoch_millis: session.modified_epoch_millis,
-            message_count: session.message_count,
-            parent_session_id: session.parent_session_id,
-            branch_name: session.branch_name,
-        })
-        .collect())
-}
-
-fn latest_managed_session() -> Result<ManagedSessionSummary, Box<dyn std::error::Error>> {
-    let session = current_session_store()?
-        .latest_session()
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-    Ok(ManagedSessionSummary {
-        id: session.id,
-        path: session.path,
-        updated_at_ms: session.updated_at_ms,
-        modified_epoch_millis: session.modified_epoch_millis,
-        message_count: session.message_count,
-        parent_session_id: session.parent_session_id,
-        branch_name: session.branch_name,
-    })
-}
-
-fn load_session_reference(
-    reference: &str,
-) -> Result<(SessionHandle, Session), Box<dyn std::error::Error>> {
-    let loaded = current_session_store()?
-        .load_session(reference)
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-    Ok((
-        SessionHandle {
-            id: loaded.handle.id,
-            path: loaded.handle.path,
-        },
-        loaded.session,
-    ))
-}
-
-fn delete_managed_session(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if !path.exists() {
-        return Err(format!("session file does not exist: {}", path.display()).into());
-    }
-    fs::remove_file(path)?;
-    Ok(())
-}
-
-fn confirm_session_deletion(session_id: &str) -> bool {
-    print!("Delete session '{session_id}'? This cannot be undone. [y/N]: ");
-    io::stdout().flush().unwrap_or(());
-    let mut answer = String::new();
-    if io::stdin().read_line(&mut answer).is_err() {
-        return false;
-    }
-    matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES")
-}
-
-fn render_session_list(active_session_id: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let sessions = list_managed_sessions()?;
-    let mut lines = vec![
-        "Sessions".to_string(),
-        format!("  Directory         {}", sessions_dir()?.display()),
-    ];
-    if sessions.is_empty() {
-        lines.push("  No managed sessions saved yet.".to_string());
-        return Ok(lines.join("\n"));
-    }
-    for session in sessions {
-        let marker = if session.id == active_session_id {
-            "● current"
-        } else {
-            "○ saved"
-        };
-        let lineage = match (
-            session.branch_name.as_deref(),
-            session.parent_session_id.as_deref(),
-        ) {
-            (Some(branch_name), Some(parent_session_id)) => {
-                format!(" branch={branch_name} from={parent_session_id}")
-            }
-            (None, Some(parent_session_id)) => format!(" from={parent_session_id}"),
-            (Some(branch_name), None) => format!(" branch={branch_name}"),
-            (None, None) => String::new(),
-        };
-        lines.push(format!(
-            "  {id:<20} {marker:<10} msgs={msgs:<4} modified={modified}{lineage} path={path}",
-            id = session.id,
-            msgs = session.message_count,
-            modified = format_session_modified_age(session.modified_epoch_millis),
-            lineage = lineage,
-            path = session.path.display(),
-        ));
-    }
-    Ok(lines.join("\n"))
-}
-
-fn format_session_modified_age(modified_epoch_millis: u128) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map_or(modified_epoch_millis, |duration| duration.as_millis());
-    let delta_seconds = now
-        .saturating_sub(modified_epoch_millis)
-        .checked_div(1_000)
-        .unwrap_or_default();
-    match delta_seconds {
-        0..=4 => "just-now".to_string(),
-        5..=59 => format!("{delta_seconds}s-ago"),
-        60..=3_599 => format!("{}m-ago", delta_seconds / 60),
-        3_600..=86_399 => format!("{}h-ago", delta_seconds / 3_600),
-        _ => format!("{}d-ago", delta_seconds / 86_400),
-    }
-}
-
-fn write_session_clear_backup(
-    session: &Session,
-    session_path: &Path,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let backup_path = session_clear_backup_path(session_path);
-    session.save_to_path(&backup_path)?;
-    Ok(backup_path)
-}
-
-fn session_clear_backup_path(session_path: &Path) -> PathBuf {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map_or(0, |duration| duration.as_millis());
-    let file_name = session_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("session.jsonl");
-    session_path.with_file_name(format!("{file_name}.before-clear-{timestamp}.bak"))
-}
-
-fn render_repl_help() -> String {
-    [
-        "REPL".to_string(),
-        "  /exit                Quit the REPL".to_string(),
-        "  /quit                Quit the REPL".to_string(),
-        "  Up/Down              Navigate prompt history".to_string(),
-        "  Ctrl-R               Reverse-search prompt history".to_string(),
-        "  Tab                  Complete commands, modes, and recent sessions".to_string(),
-        "  Ctrl-C               Clear input (or exit on empty prompt)".to_string(),
-        "  Shift+Enter/Ctrl+J   Insert a newline".to_string(),
-        "  Auto-save            .claw/sessions/<session-id>.jsonl".to_string(),
-        "  Resume latest        /resume latest".to_string(),
-        "  Browse sessions      /session list".to_string(),
-        "  Show prompt history  /history [count]".to_string(),
-        String::new(),
-        render_slash_command_help_filtered(STUB_COMMANDS),
-    ]
-    .join(
-        "
-",
-    )
-}
-
 fn print_status_snapshot(
     model: &str,
     permission_mode: PermissionMode,
@@ -4490,7 +3773,7 @@ fn print_status_snapshot(
     Ok(())
 }
 
-fn status_json_value(
+pub(crate) fn status_json_value(
     model: Option<&str>,
     usage: StatusUsage,
     permission_mode: &str,
@@ -4546,7 +3829,7 @@ fn status_json_value(
     })
 }
 
-fn status_context(
+pub(crate) fn status_context(
     session_path: Option<&Path>,
 ) -> Result<StatusContext, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
@@ -4571,7 +3854,7 @@ fn status_context(
     })
 }
 
-fn format_status_report(
+pub(crate) fn format_status_report(
     model: &str,
     usage: StatusUsage,
     permission_mode: &str,
@@ -4640,7 +3923,7 @@ fn format_status_report(
     )
 }
 
-fn format_sandbox_report(status: &runtime::SandboxStatus) -> String {
+pub(crate) fn format_sandbox_report(status: &runtime::SandboxStatus) -> String {
     format!(
         "Sandbox
   Enabled           {}
@@ -4725,7 +4008,7 @@ fn print_sandbox_status_snapshot(
     Ok(())
 }
 
-fn sandbox_json_value(status: &runtime::SandboxStatus) -> serde_json::Value {
+pub(crate) fn sandbox_json_value(status: &runtime::SandboxStatus) -> serde_json::Value {
     json!({
         "kind": "sandbox",
         "enabled": status.enabled,
@@ -4771,7 +4054,9 @@ fn print_help_topic(topic: LocalHelpTopic) {
     println!("{}", render_help_topic(topic));
 }
 
-fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
+pub(crate) fn render_config_report(
+    section: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let loader = ConfigLoader::default_for(&cwd);
     let discovered = loader.discover();
@@ -4850,7 +4135,7 @@ fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::er
     ))
 }
 
-fn render_config_json(
+pub(crate) fn render_config_json(
     _section: Option<&str>,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
@@ -4893,7 +4178,7 @@ fn render_config_json(
     }))
 }
 
-fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
+pub(crate) fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let project_context = ProjectContext::discover(&cwd, DEFAULT_DATE)?;
     let mut lines = vec![format!(
@@ -4932,7 +4217,7 @@ fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
     ))
 }
 
-fn render_memory_json() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+pub(crate) fn render_memory_json() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let project_context = ProjectContext::discover(&cwd, DEFAULT_DATE)?;
     let files: Vec<_> = project_context
@@ -4954,7 +4239,7 @@ fn render_memory_json() -> Result<serde_json::Value, Box<dyn std::error::Error>>
     }))
 }
 
-fn init_claude_md() -> Result<String, Box<dyn std::error::Error>> {
+pub(crate) fn init_claude_md() -> Result<String, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     Ok(initialize_repo(&cwd)?.render())
 }
@@ -4971,7 +4256,7 @@ fn run_init(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-fn init_json_value(message: &str) -> serde_json::Value {
+pub(crate) fn init_json_value(message: &str) -> serde_json::Value {
     json!({
         "kind": "init",
         "message": message,
@@ -4982,7 +4267,7 @@ fn render_diff_report() -> Result<String, Box<dyn std::error::Error>> {
     render_diff_report_for(&env::current_dir()?)
 }
 
-fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::error::Error>> {
+pub(crate) fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::error::Error>> {
     // Verify we are inside a git repository before calling `git diff`.
     // Running `git diff --cached` outside a git tree produces a misleading
     // "unknown option `cached`" error because git falls back to --no-index mode.
@@ -5018,7 +4303,9 @@ fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::error::Erro
     Ok(format!("Diff\n\n{}", sections.join("\n\n")))
 }
 
-fn render_diff_json_for(cwd: &Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+pub(crate) fn render_diff_json_for(
+    cwd: &Path,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let in_git_repo = std::process::Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(cwd)
@@ -5267,7 +4554,7 @@ fn write_temp_text_file(
 
 const DEFAULT_HISTORY_LIMIT: usize = 20;
 
-fn parse_history_count(raw: Option<&str>) -> Result<usize, String> {
+pub(crate) fn parse_history_count(raw: Option<&str>) -> Result<usize, String> {
     let Some(raw) = raw else {
         return Ok(DEFAULT_HISTORY_LIMIT);
     };
@@ -5293,7 +4580,7 @@ fn format_history_timestamp(timestamp_ms: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{subsec_ms:03}Z")
 }
 
-fn render_prompt_history_report(entries: &[PromptHistoryEntry], limit: usize) -> String {
+pub(crate) fn render_prompt_history_report(entries: &[PromptHistoryEntry], limit: usize) -> String {
     if entries.is_empty() {
         return "Prompt history\n  Result           no prompts recorded yet".to_string();
     }
@@ -5323,7 +4610,7 @@ fn render_prompt_history_report(entries: &[PromptHistoryEntry], limit: usize) ->
     lines.join("\n")
 }
 
-fn collect_session_prompt_history(session: &Session) -> Vec<PromptHistoryEntry> {
+pub(crate) fn collect_session_prompt_history(session: &Session) -> Vec<PromptHistoryEntry> {
     if !session.prompt_history.is_empty() {
         return session
             .prompt_history
@@ -5402,7 +4689,7 @@ fn parse_titled_body(value: &str) -> Option<(String, String)> {
     Some((title.to_string(), body.to_string()))
 }
 
-fn render_version_report() -> String {
+pub(crate) fn render_version_report() -> String {
     let git_sha = GIT_SHA.unwrap_or("unknown");
     let target = BUILD_TARGET.unwrap_or("unknown");
     format!(
@@ -5410,7 +4697,7 @@ fn render_version_report() -> String {
     )
 }
 
-fn render_export_text(session: &Session) -> String {
+pub(crate) fn render_export_text(session: &Session) -> String {
     let mut lines = vec!["# Conversation Export".to_string(), String::new()];
     for (index, message) in session.messages.iter().enumerate() {
         let role = match message.role {
@@ -5479,7 +4766,7 @@ fn default_export_filename(session: &Session) -> String {
     format!("{fallback}.txt")
 }
 
-fn resolve_export_path(
+pub(crate) fn resolve_export_path(
     requested_path: Option<&str>,
     session: &Session,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -6727,205 +6014,6 @@ fn collect_prompt_cache_events(summary: &runtime::TurnSummary) -> Vec<serde_json
             })
         })
         .collect()
-}
-
-/// Slash commands that are registered in the spec list but not yet implemented
-/// in this build. Used to filter both REPL completions and help output so the
-/// discovery surface only shows commands that actually work (ROADMAP #39).
-const STUB_COMMANDS: &[&str] = &[
-    "login",
-    "logout",
-    "vim",
-    "upgrade",
-    "share",
-    "feedback",
-    "files",
-    "fast",
-    "exit",
-    "summary",
-    "desktop",
-    "brief",
-    "advisor",
-    "stickers",
-    "insights",
-    "thinkback",
-    "release-notes",
-    "security-review",
-    "keybindings",
-    "privacy-settings",
-    "plan",
-    "review",
-    "tasks",
-    "theme",
-    "voice",
-    "usage",
-    "rename",
-    "copy",
-    "hooks",
-    "context",
-    "color",
-    "effort",
-    "branch",
-    "rewind",
-    "ide",
-    "tag",
-    "output-style",
-    "add-dir",
-    // Spec entries with no parse arm — produce circular "Did you mean" error
-    // without this guard. Adding here routes them to the proper unsupported
-    // message and excludes them from REPL completions / help.
-    // NOTE: do NOT add "stats", "tokens", "cache" — they are implemented.
-    "allowed-tools",
-    "bookmarks",
-    "workspace",
-    "reasoning",
-    "budget",
-    "rate-limit",
-    "changelog",
-    "diagnostics",
-    "metrics",
-    "tool-details",
-    "focus",
-    "unfocus",
-    "pin",
-    "unpin",
-    "language",
-    "profile",
-    "max-tokens",
-    "temperature",
-    "system-prompt",
-    "notifications",
-    "telemetry",
-    "env",
-    "project",
-    "terminal-setup",
-    "api-key",
-    "reset",
-    "undo",
-    "stop",
-    "retry",
-    "paste",
-    "screenshot",
-    "image",
-    "search",
-    "listen",
-    "speak",
-    "format",
-    "test",
-    "lint",
-    "build",
-    "run",
-    "git",
-    "stash",
-    "blame",
-    "log",
-    "cron",
-    "team",
-    "benchmark",
-    "migrate",
-    "templates",
-    "explain",
-    "refactor",
-    "docs",
-    "fix",
-    "perf",
-    "chat",
-    "web",
-    "map",
-    "symbols",
-    "references",
-    "definition",
-    "hover",
-    "autofix",
-    "multi",
-    "macro",
-    "alias",
-    "parallel",
-    "subagent",
-    "agent",
-];
-
-fn slash_command_completion_candidates_with_sessions(
-    model: &str,
-    active_session_id: Option<&str>,
-    recent_session_ids: Vec<String>,
-) -> Vec<String> {
-    let mut completions = BTreeSet::new();
-
-    for spec in slash_command_specs() {
-        if STUB_COMMANDS.contains(&spec.name) {
-            continue;
-        }
-        completions.insert(format!("/{}", spec.name));
-        for alias in spec.aliases {
-            if !STUB_COMMANDS.contains(alias) {
-                completions.insert(format!("/{alias}"));
-            }
-        }
-    }
-
-    for candidate in [
-        "/bughunter ",
-        "/clear --confirm",
-        "/config ",
-        "/config env",
-        "/config hooks",
-        "/config model",
-        "/config plugins",
-        "/mcp ",
-        "/mcp list",
-        "/mcp show ",
-        "/export ",
-        "/issue ",
-        "/model ",
-        "/model opus",
-        "/model sonnet",
-        "/model haiku",
-        "/permissions ",
-        "/permissions read-only",
-        "/permissions workspace-write",
-        "/permissions danger-full-access",
-        "/plugin list",
-        "/plugin install ",
-        "/plugin enable ",
-        "/plugin disable ",
-        "/plugin uninstall ",
-        "/plugin update ",
-        "/plugins list",
-        "/pr ",
-        "/resume ",
-        "/session list",
-        "/session switch ",
-        "/session fork ",
-        "/teleport ",
-        "/ultraplan ",
-        "/agents help",
-        "/mcp help",
-        "/skills help",
-    ] {
-        completions.insert(candidate.to_string());
-    }
-
-    if !model.trim().is_empty() {
-        completions.insert(format!("/model {}", resolve_model_alias(model)));
-        completions.insert(format!("/model {model}"));
-    }
-
-    if let Some(active_session_id) = active_session_id.filter(|value| !value.trim().is_empty()) {
-        completions.insert(format!("/resume {active_session_id}"));
-        completions.insert(format!("/session switch {active_session_id}"));
-    }
-
-    for session_id in recent_session_ids
-        .into_iter()
-        .filter(|value| !value.trim().is_empty())
-        .take(10)
-    {
-        completions.insert(format!("/resume {session_id}"));
-        completions.insert(format!("/session switch {session_id}"));
-    }
-
-    completions.into_iter().collect()
 }
 
 fn format_tool_call_start(name: &str, input: &str) -> String {
