@@ -2177,6 +2177,13 @@ fn run_repl(
         input::LineEditor::new("> ", cli.repl_completion_candidates().unwrap_or_default());
     println!("{}", cli.startup_banner());
     println!("{}", format_connected_line(&cli.model));
+    let pending_meta_alerts = fetch_pending_meta_alerts();
+    if !pending_meta_alerts.is_empty() {
+        println!(
+            "\u{26A0} 메타 경고 {}건 대기 중 — 'clawd meta report'",
+            pending_meta_alerts.len()
+        );
+    }
 
     loop {
         editor.set_completions(cli.repl_completion_candidates().unwrap_or_default());
@@ -2693,6 +2700,91 @@ impl HookAbortMonitor {
     }
 }
 
+/// Best-effort fetch of pending critical meta alerts, intended for the
+/// session-start banner. Any error (sidecar down, timeout, parse issue)
+/// is swallowed so REPL startup is never blocked.
+fn fetch_pending_meta_alerts() -> Vec<commands::meta_cmd::Alert> {
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return Vec::new();
+    };
+    rt.block_on(commands::meta_cmd::fetch_alerts(
+        &commands::meta_cmd::router_url(),
+    ))
+    .unwrap_or_default()
+}
+
+/// Dispatch for `/meta <action> [target]`. Runs the matching helper from
+/// `commands::meta_cmd` on a short-lived tokio runtime and prints a
+/// user-facing status line. Errors are reported via eprintln so the REPL
+/// loop is never killed by a sidecar failure.
+fn handle_meta_slash_command(action: Option<&str>, target: Option<&str>) {
+    let url = commands::meta_cmd::router_url();
+    match action {
+        Some("report") | None => match commands::meta_cmd::open_report_url(&url) {
+            Ok(()) => println!("Opened {url}/meta/report in the default browser."),
+            Err(error) => eprintln!("Failed to open meta report: {error}"),
+        },
+        Some("alerts") => {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                eprintln!("Failed to start async runtime for /meta alerts.");
+                return;
+            };
+            match rt.block_on(commands::meta_cmd::fetch_alerts(&url)) {
+                Ok(alerts) => match serde_json::to_string_pretty(&alerts) {
+                    Ok(rendered) => println!("{rendered}"),
+                    Err(error) => eprintln!("Failed to render alerts: {error}"),
+                },
+                Err(error) => eprintln!("Failed to fetch alerts: {error}"),
+            }
+        }
+        Some("ack") => {
+            let Some(alert_id) = target else {
+                eprintln!("Usage: /meta ack <alert-id>");
+                return;
+            };
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                eprintln!("Failed to start async runtime for /meta ack.");
+                return;
+            };
+            match rt.block_on(commands::meta_cmd::ack(&url, alert_id)) {
+                Ok(()) => println!("Acknowledged alert {alert_id}."),
+                Err(error) => eprintln!("Failed to ack alert {alert_id}: {error}"),
+            }
+        }
+        Some("unblock") => {
+            let Some(meta_target) = target else {
+                eprintln!("Usage: /meta unblock <target>");
+                return;
+            };
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                eprintln!("Failed to start async runtime for /meta unblock.");
+                return;
+            };
+            match rt.block_on(commands::meta_cmd::unblock(&url, meta_target)) {
+                Ok(()) => println!("Unblocked target {meta_target}."),
+                Err(error) => eprintln!("Failed to unblock {meta_target}: {error}"),
+            }
+        }
+        Some(other) => {
+            eprintln!(
+                "Unknown /meta subcommand: {other}. Expected one of: report, alerts, ack, unblock."
+            );
+        }
+    }
+}
+
 impl LiveCli {
     fn new(
         model: String,
@@ -3044,6 +3136,10 @@ impl LiveCli {
             SlashCommand::Stats => {
                 let usage = UsageTracker::from_session(self.runtime.session()).cumulative_usage();
                 println!("{}", format_cost_report(usage));
+                false
+            }
+            SlashCommand::Meta { action, target } => {
+                handle_meta_slash_command(action.as_deref(), target.as_deref());
                 false
             }
             SlashCommand::Login

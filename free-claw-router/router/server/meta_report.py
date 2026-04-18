@@ -67,6 +67,69 @@ def meta_unblock(target: str) -> dict:
     return {"ok": True, "target": target}
 
 
+@router.get("/meta/alerts")
+def meta_alerts() -> list[dict]:
+    """Return un-acknowledged critical meta_alert events from the last 7 days."""
+    d = _data_dir()
+    db = d / "telemetry.db"
+    if not db.exists():
+        return []
+    conn = sqlite3.connect(str(db))
+    try:
+        alert_rows = conn.execute(
+            "SELECT payload_json, ts FROM events "
+            "WHERE kind='meta_alert' "
+            "AND json_extract(payload_json,'$.level')='critical' "
+            "AND ts >= DATE('now','-7 days') "
+            "ORDER BY ts DESC"
+        ).fetchall()
+        ack_ids = {
+            row[0] for row in conn.execute(
+                "SELECT json_extract(payload_json,'$.alert_id') FROM events "
+                "WHERE kind='meta_ack'"
+            ).fetchall() if row[0]
+        }
+    finally:
+        conn.close()
+
+    out: list[dict] = []
+    for payload_json, ts in alert_rows:
+        try:
+            rec = json.loads(payload_json)
+        except Exception:
+            continue
+        aid = rec.get("alert_id")
+        if not aid or aid in ack_ids:
+            continue
+        out.append({
+            "id": aid,
+            "level": rec.get("level", "info"),
+            "message": rec.get("message", ""),
+            "ts": ts,
+        })
+    return out
+
+
+@router.post("/meta/ack/{alert_id}")
+def meta_ack(alert_id: str) -> dict:
+    """Mark a critical alert as acknowledged."""
+    d = _data_dir()
+    db = d / "telemetry.db"
+    if not db.exists():
+        return {"ok": False, "reason": "no telemetry db"}
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "INSERT INTO events(span_id, kind, payload_json, ts) "
+            "VALUES (NULL, 'meta_ack', ?, ?)",
+            (json.dumps({"alert_id": alert_id}), datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "alert_id": alert_id}
+
+
 def _summarize_24h(db: Path) -> dict:
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     if not db.exists():
