@@ -60,8 +60,7 @@ pub async fn register_cron_with_fallback(
     }
     std::fs::create_dir_all(fallback_dir)?;
     let path = fallback_dir.join(format!("{}.json", spec.job_id));
-    let bytes =
-        serde_json::to_vec_pretty(spec).map_err(|e| CronError::Serde(e.to_string()))?;
+    let bytes = serde_json::to_vec_pretty(spec).map_err(|e| CronError::Serde(e.to_string()))?;
     std::fs::write(path, bytes)?;
     Ok(())
 }

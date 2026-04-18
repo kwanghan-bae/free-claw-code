@@ -36,7 +36,8 @@ async fn register_cron_falls_back_on_error() {
         payload: serde_json::json!({}),
     };
     // Use an unused loopback port to force connection error
-    let result = register_cron_with_fallback("http://127.0.0.1:1", &spec, fallback_dir.path()).await;
+    let result =
+        register_cron_with_fallback("http://127.0.0.1:1", &spec, fallback_dir.path()).await;
     assert!(result.is_ok());
     assert!(fallback_dir.path().join("xyz.json").exists());
 }
