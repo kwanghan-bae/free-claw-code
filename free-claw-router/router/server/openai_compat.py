@@ -1,11 +1,20 @@
 from pathlib import Path
-import json
 import time as _time
 import time
 import secrets
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from router.server.lifespan import lifespan
+from router.server._telemetry_middleware import (
+    start_trace,
+    start_span,
+    emit_event,
+    emit_quota_reserved,
+    emit_quota_exhausted,
+    emit_request_event,
+    emit_response_event,
+    emit_dispatch_result,
+)
 from router.catalog.registry import Registry
 from router.routing.policy import Policy
 from router.routing.hints import classify_task_hint
@@ -16,7 +25,6 @@ from router.quota.bucket import BucketStore
 from router.quota.predict import estimate_request_tokens
 from router.adapters.hermes_ratelimit import RateLimitState
 from router.telemetry.spans import parse_traceparent, TraceContext
-from router.telemetry import events as ev
 from router.telemetry.store import Store
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "catalog" / "data"
@@ -76,19 +84,8 @@ async def chat_completions(request: Request) -> JSONResponse:
         trace_id = secrets.token_bytes(16)
     root_span_id = secrets.token_bytes(8)
 
-    if store:
-        try:
-            catalog_ver = getattr(app.state, "catalog_version", "unversioned")
-            store.insert_trace(
-                trace_id=trace_id,
-                started_at_ms=int(time.time() * 1000),
-                root_op="chat_completions",
-                root_session_id=None,
-                catalog_version=catalog_ver,
-                policy_version="1",
-            )
-        except Exception:
-            pass
+    catalog_ver = getattr(app.state, "catalog_version", "unversioned")
+    start_trace(store, trace_id=trace_id, root_op="chat_completions", catalog_version=catalog_ver)
 
     # Memory injection (P1)
     _trace_hex = trace_id.hex() if trace_id else ""
@@ -142,100 +139,46 @@ async def chat_completions(request: Request) -> JSONResponse:
         span_id = secrets.token_bytes(8)
         span_start = int(time.time() * 1000)
 
-        # Insert span (best-effort)
-        if store:
-            try:
-                store.insert_span(
-                    span_id=span_id,
-                    trace_id=trace_id,
-                    parent_span_id=root_span_id,
-                    op_name="llm_call",
-                    model_id=cand.model_id,
-                    provider_id=cand.provider_id,
-                    skill_id=None,
-                    task_type=hint,
-                    started_at_ms=span_start,
-                )
-            except Exception:
-                pass
+        start_span(
+            store,
+            span_id=span_id, trace_id=trace_id, parent_span_id=root_span_id,
+            op_name="llm_call", model_id=cand.model_id, provider_id=cand.provider_id,
+            task_type=hint, started_at_ms=span_start,
+        )
 
         try:
             tok = await bucket.reserve(tokens_estimated=estimated)
         except RuntimeError:
-            # Emit quota_reserved event even on exhaustion? No, we failed to reserve.
-            if store:
-                try:
-                    now = int(time.time() * 1000)
-                    store.close_span(span_id, ended_at_ms=now, duration_ms=now - span_start, status="quota_exhausted")
-                    event_payload = ev.to_payload(ev.DispatchFailed(
-                        provider_id=cand.provider_id, model_id=cand.model_id,
-                        status=429, error_class="quota_exhausted",
-                    ))
-                    store.insert_event(span_id=span_id, kind="dispatch_failed",
-                                       payload_json=json.dumps(event_payload), ts_ms=now)
-                except Exception:
-                    pass
+            emit_quota_exhausted(
+                store,
+                span_id=span_id, span_start_ms=span_start,
+                provider_id=cand.provider_id, model_id=cand.model_id,
+            )
             return DispatchResult(429, {"error": "quota_exhausted"}, RateLimitState(), {})
 
-        # Emit quota_reserved event (best-effort)
-        if store:
-            try:
-                event_payload = ev.to_payload(ev.QuotaReserved(
-                    provider_id=cand.provider_id, model_id=cand.model_id,
-                    tokens_estimated=estimated, bucket_rpm_used=bucket.rpm_used(),
-                ))
-                store.insert_event(span_id=span_id, kind="quota_reserved",
-                                   payload_json=json.dumps(event_payload), ts_ms=int(time.time() * 1000))
-            except Exception:
-                pass
-
-        # Record request event for transcript mining (best-effort)
-        if store:
-            try:
-                store.insert_event(span_id=span_id, kind="request",
-                    payload_json=json.dumps({"messages": payload.get("messages", [])}),
-                    ts_ms=int(time.time() * 1000))
-            except Exception:
-                pass
+        emit_quota_reserved(
+            store,
+            span_id=span_id, provider_id=cand.provider_id, model_id=cand.model_id,
+            tokens_estimated=estimated, bucket_rpm_used=bucket.rpm_used(),
+        )
+        emit_request_event(store, span_id=span_id, messages=payload.get("messages", []))
 
         result = await _dispatch.call(provider, cand.model, payload, dict(request.headers))
 
-        # Record response event for transcript mining (best-effort)
-        if store and result.status == 200:
-            try:
-                store.insert_event(span_id=span_id, kind="response",
-                    payload_json=json.dumps(result.body),
-                    ts_ms=int(time.time() * 1000))
-            except Exception:
-                pass
+        if result.status == 200:
+            emit_response_event(store, span_id=span_id, body=result.body)
 
         if result.status == 200:
             await bucket.commit(tok, tokens_actual=estimated)
         else:
             await bucket.rollback(tok)
 
-        # Close span + emit dispatch event (best-effort)
-        now = int(time.time() * 1000)
-        if store:
-            try:
-                status = "ok" if result.status == 200 else f"http_{result.status}"
-                store.close_span(span_id, ended_at_ms=now, duration_ms=now - span_start, status=status)
-                if result.status == 200:
-                    event_payload = ev.to_payload(ev.DispatchSucceeded(
-                        provider_id=cand.provider_id, model_id=cand.model_id,
-                        status=result.status, latency_ms=now - span_start,
-                    ))
-                    store.insert_event(span_id=span_id, kind="dispatch_succeeded",
-                                       payload_json=json.dumps(event_payload), ts_ms=now)
-                else:
-                    event_payload = ev.to_payload(ev.DispatchFailed(
-                        provider_id=cand.provider_id, model_id=cand.model_id,
-                        status=result.status, error_class=f"http_{result.status}",
-                    ))
-                    store.insert_event(span_id=span_id, kind="dispatch_failed",
-                                       payload_json=json.dumps(event_payload), ts_ms=now)
-            except Exception:
-                pass
+        emit_dispatch_result(
+            store,
+            span_id=span_id, span_start_ms=span_start,
+            provider_id=cand.provider_id, model_id=cand.model_id,
+            result=result,
+        )
 
         return result
 
@@ -268,7 +211,6 @@ async def chat_completions(request: Request) -> JSONResponse:
     _batch = getattr(app.state, "batch_analyzer", None)
     if _conv_buf and _batch and _ncache:
         if _conv_buf.turn_count(_trace_hex) % 5 == 0 and _conv_buf.turn_count(_trace_hex) > 0:
-            import asyncio
             try:
                 batch_nudges = await _batch.analyze(_trace_hex, _conv_buf)
                 for n in batch_nudges:
