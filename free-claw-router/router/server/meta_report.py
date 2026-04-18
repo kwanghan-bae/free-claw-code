@@ -45,7 +45,7 @@ td,th{border-bottom:1px solid #eee;padding:4px 8px;text-align:left}
 def meta_report() -> HTMLResponse:
     d = _data_dir()
     db_path = d / "telemetry.db"
-    suggestions_path = d / "suggestions.jsonl"
+    suggestions_path = d / "meta_suggestions.json"
 
     summary = _summarize_24h(db_path)
     timelines = _timelines_per_target(suggestions_path)
@@ -151,18 +151,39 @@ def _summarize_24h(db: Path) -> dict:
 
 
 def _timelines_per_target(sug: Path) -> list[dict]:
+    """Read MetaSuggestion records from the production JSON-array store
+    and group them per target_file for timeline display.
+
+    The file is written by ``SuggestionStore._save`` as ``json.dumps(list[dict], indent=2)``
+    where each dict is an ``asdict(MetaSuggestion)`` with fields: id, trace_id,
+    target_file, edit_type, direction, rationale, confidence, proposed_diff,
+    timestamp (float Unix seconds).
+    """
     if not sug.exists():
         return []
+    try:
+        raw = json.loads(sug.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(raw, list):
+        return []
+
     groups: dict[str, list[dict]] = {}
-    for line in sug.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
+    for rec in raw:
+        if not isinstance(rec, dict):
             continue
+        tid = rec.get("target_file", "?")
+        ts_raw = rec.get("timestamp")
         try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        tid = rec.get("target_id", "?")
-        groups.setdefault(tid, []).append(rec)
+            ts_iso = datetime.fromtimestamp(float(ts_raw), tz=timezone.utc).isoformat()
+        except (TypeError, ValueError):
+            ts_iso = ""
+        note = (rec.get("rationale") or "")[:80]
+        groups.setdefault(tid, []).append({
+            "ts": ts_iso,
+            "kind": "proposed",
+            "note": note,
+        })
     return [
         {"target": tid, "events": sorted(items, key=lambda r: r.get("ts", ""))}
         for tid, items in groups.items()

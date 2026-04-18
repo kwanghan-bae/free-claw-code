@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
@@ -27,11 +28,24 @@ def _seed_fixtures(path):
         )
     conn.commit()
     conn.close()
-    sug = path / "suggestions.jsonl"
-    targets = [f"target_{i}" for i in range(10)]
-    with sug.open("w") as f:
-        for t in targets:
-            f.write(json.dumps({"target_id": t, "kind": "proposed", "note": "x", "ts": now, "status": "pending"}) + "\n")
+    # Production-canonical suggestion store: JSON array of MetaSuggestion records.
+    sug = path / "meta_suggestions.json"
+    ts = time.time()
+    records = [
+        {
+            "id": f"sug{i:02d}",
+            "trace_id": f"trace_{i}",
+            "target_file": f"target_{i}.py",
+            "edit_type": "prompt",
+            "direction": "tighten guardrail",
+            "rationale": f"rationale for target {i}",
+            "confidence": 0.7,
+            "proposed_diff": "",
+            "timestamp": ts,
+        }
+        for i in range(10)
+    ]
+    sug.write_text(json.dumps(records, indent=2), encoding="utf-8")
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):

@@ -1,20 +1,24 @@
 """Store garbage collection with two-phase (dry-run + commit) safety.
 
 Retention policy (overridable via env):
-    spans:                   30 days (FCR_GC_SPAN_DAYS)
-    events:                  90 days (FCR_GC_EVENT_DAYS)
-    evaluations:             180 days (FCR_GC_EVAL_DAYS)
-    suggestions (applied):   30 days (FCR_GC_SUGGESTION_DAYS)
-    suggestions (rejected):  7 days  (FCR_GC_SUGGESTION_REJECTED_DAYS)
-    pending suggestions:     retained indefinitely
+    spans:        30 days  (FCR_GC_SPAN_DAYS)
+    events:       90 days  (FCR_GC_EVENT_DAYS)
+    evaluations:  180 days (FCR_GC_EVAL_DAYS)
+    suggestions:  30 days  (FCR_GC_SUGGESTION_DAYS)
 
 FCR_GC_DRY_RUN=1 reports counts without deleting.
 FCR_GC_PAUSED=1 disables GC entirely (audit mode).
+
+The suggestion store is the canonical ``meta_suggestions.json`` (JSON array
+of MetaSuggestion records written by ``SuggestionStore``). MetaSuggestion
+has no status field — retention is purely age-based on ``timestamp``
+(float Unix seconds).
 """
 from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,13 +30,16 @@ class GcConfig:
     event_days: int = field(default_factory=lambda: int(os.getenv("FCR_GC_EVENT_DAYS", "90")))
     eval_days: int = field(default_factory=lambda: int(os.getenv("FCR_GC_EVAL_DAYS", "180")))
     sug_applied_days: int = field(default_factory=lambda: int(os.getenv("FCR_GC_SUGGESTION_DAYS", "30")))
-    sug_rejected_days: int = field(default_factory=lambda: int(os.getenv("FCR_GC_SUGGESTION_REJECTED_DAYS", "7")))
     dry_run: bool = field(default_factory=lambda: os.getenv("FCR_GC_DRY_RUN", "0") == "1")
     paused: bool = field(default_factory=lambda: os.getenv("FCR_GC_PAUSED", "0") == "1")
 
 
 def _iso_cutoff(days: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+def _epoch_cutoff(days: int) -> float:
+    return time.time() - days * 86400
 
 
 def run_gc(db_path: Path, suggestions_path: Path, cfg: GcConfig) -> dict:
@@ -91,38 +98,39 @@ def run_gc(db_path: Path, suggestions_path: Path, cfg: GcConfig) -> dict:
             conn.close()
 
     if suggestions_path.exists():
-        lines = suggestions_path.read_text(encoding="utf-8").splitlines()
-        kept: list[str] = []
+        try:
+            raw = json.loads(suggestions_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            raw = []
+        if not isinstance(raw, list):
+            raw = []
+
+        cutoff = _epoch_cutoff(cfg.sug_applied_days)
+        kept_items: list[dict] = []
         would_delete = 0
-        for line in lines:
-            if not line.strip():
+        for rec in raw:
+            if not isinstance(rec, dict):
+                kept_items.append(rec)
                 continue
+            ts = rec.get("timestamp")
             try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                kept.append(line)
+                ts_f = float(ts)
+            except (TypeError, ValueError):
+                # Unparseable timestamp — keep the record (safe default).
+                kept_items.append(rec)
                 continue
-            ts = rec.get("ts", "")
-            status = rec.get("status", "pending")
-            if status == "applied" and ts < _iso_cutoff(cfg.sug_applied_days):
+            if ts_f < cutoff:
                 would_delete += 1
                 if cfg.dry_run:
-                    kept.append(line)
+                    kept_items.append(rec)
                 continue
-            if status == "rejected" and ts < _iso_cutoff(cfg.sug_rejected_days):
-                would_delete += 1
-                if cfg.dry_run:
-                    kept.append(line)
-                continue
-            kept.append(line)
+            kept_items.append(rec)
 
         if cfg.dry_run:
             stats["suggestions_would_delete"] = would_delete
         else:
             stats["suggestions_deleted"] = would_delete
-            content = "\n".join(kept)
-            if content:
-                content += "\n"
-            suggestions_path.write_text(content, encoding="utf-8")
+            suggestions_path.parent.mkdir(parents=True, exist_ok=True)
+            suggestions_path.write_text(json.dumps(kept_items, indent=2), encoding="utf-8")
 
     return stats

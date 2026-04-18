@@ -207,7 +207,7 @@ async def lifespan(app: FastAPI):
         try:
             stats = run_gc(
                 data_dir / "telemetry.db",
-                data_dir / "suggestions.jsonl",
+                data_dir / "meta_suggestions.json",
                 GcConfig(),
             )
             gc_log.info("gc_run %s", stats)
