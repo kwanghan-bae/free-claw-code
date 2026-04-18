@@ -1,3 +1,20 @@
+//! Tools crate — built-in tool implementations and registry.
+//!
+//! Tool handlers are grouped into concept-specific submodules:
+//! - [`bash`] — shell execution + workspace-test branch preflight
+//! - [`browser`] — `WebFetch`/`WebSearch` and HTML parsing helpers
+//! - [`file`] — read/write/edit/glob/grep file tools
+//! - [`git`] — git ref and branch helpers
+//! - [`lsp`] — language-server dispatch
+//! - [`search`] — `ToolSearch` implementation (deferred-tool schema lookup)
+//! - [`lane_completion`], [`pdf_extract`] — standalone sibling modules
+//!
+//! Remaining symbols in `lib.rs` cover the registry scaffolding
+//! (`GlobalToolRegistry`, `ToolSpec`, `execute_tool`, dispatch map)
+//! and tool handlers that have not yet been split out (todo, skill,
+//! agent, notebook, powershell, config, cron, team, worker, mcp, etc.),
+//! alongside the provider-runtime plumbing and the tests module.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
