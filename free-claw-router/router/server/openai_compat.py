@@ -25,6 +25,7 @@ from router.quota.predict import estimate_request_tokens
 from router.telemetry.spans import parse_traceparent
 from router.telemetry.store import Store
 from router.server.meta_report import router as meta_report_router
+from router.server.dev_triggers import router as dev_triggers_router
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ POLICY_PATH = Path(__file__).resolve().parent.parent / "routing" / "policy.yaml"
 
 app = FastAPI(title="free-claw-router", lifespan=lifespan)
 app.include_router(meta_report_router)
+app.include_router(dev_triggers_router)
 
 _policy: Policy | None = None
 _dispatch = DispatchClient()
