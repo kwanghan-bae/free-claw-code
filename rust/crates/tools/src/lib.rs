@@ -11,18 +11,17 @@ use api::{
 use plugins::PluginTool;
 use reqwest::blocking::Client;
 use runtime::{
-    dedupe_superseded_commit_events, edit_file, glob_search, grep_search, load_system_prompt,
+    dedupe_superseded_commit_events, load_system_prompt,
     lsp_client::LspRegistry,
     mcp_tool_bridge::McpToolRegistry,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
-    read_file,
     summary_compression::compress_summary_text,
     task_registry::TaskRegistry,
     team_cron_registry::{CronRegistry, TeamRegistry},
     worker_boot::{WorkerReadySnapshot, WorkerRegistry, WorkerTaskReceipt},
-    write_file, ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ConfigLoader,
-    ContentBlock, ConversationMessage, ConversationRuntime, GrepSearchInput, LaneCommitProvenance,
-    LaneEvent, LaneEventBlocker, LaneFailureClass, McpDegradedReport, MessageRole, PermissionMode,
+    ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ConfigLoader, ContentBlock,
+    ConversationMessage, ConversationRuntime, GrepSearchInput, LaneCommitProvenance, LaneEvent,
+    LaneEventBlocker, LaneFailureClass, McpDegradedReport, MessageRole, PermissionMode,
     PermissionPolicy, PromptCacheEvent, ProviderFallbackConfig, RuntimeError, Session, TaskPacket,
     ToolError, ToolExecutor,
 };
@@ -33,12 +32,17 @@ use serde_json::{json, Value};
 
 pub mod bash;
 pub mod browser;
+pub mod file;
 pub mod git;
 pub mod lsp;
 pub mod search;
 
 pub(crate) use bash::{classify_bash_permission, run_bash, workspace_test_branch_preflight};
 pub(crate) use browser::{run_web_fetch, run_web_search, WebFetchInput, WebSearchInput};
+pub(crate) use file::{
+    run_edit_file, run_glob_search, run_grep_search, run_read_file, run_write_file, EditFileInput,
+    GlobSearchInputValue, ReadFileInput, WriteFileInput,
+};
 pub(crate) use git::{current_git_branch, extract_commit_sha};
 pub(crate) use lsp::{run_lsp, LspInput};
 pub(crate) use search::{
@@ -1836,39 +1840,6 @@ fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> 
     serde_json::from_value(input.clone()).map_err(|error| error.to_string())
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn run_read_file(input: ReadFileInput) -> Result<String, String> {
-    to_pretty_json(read_file(&input.path, input.offset, input.limit).map_err(io_to_string)?)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_write_file(input: WriteFileInput) -> Result<String, String> {
-    to_pretty_json(write_file(&input.path, &input.content).map_err(io_to_string)?)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_edit_file(input: EditFileInput) -> Result<String, String> {
-    to_pretty_json(
-        edit_file(
-            &input.path,
-            &input.old_string,
-            &input.new_string,
-            input.replace_all.unwrap_or(false),
-        )
-        .map_err(io_to_string)?,
-    )
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_glob_search(input: GlobSearchInputValue) -> Result<String, String> {
-    to_pretty_json(glob_search(&input.pattern, input.path.as_deref()).map_err(io_to_string)?)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_grep_search(input: GrepSearchInput) -> Result<String, String> {
-    to_pretty_json(grep_search(&input).map_err(io_to_string)?)
-}
-
 fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
     to_pretty_json(execute_todo_write(input)?)
 }
@@ -1994,35 +1965,8 @@ pub(crate) fn to_pretty_json<T: serde::Serialize>(value: T) -> Result<String, St
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn io_to_string(error: std::io::Error) -> String {
+pub(crate) fn io_to_string(error: std::io::Error) -> String {
     error.to_string()
-}
-
-#[derive(Debug, Deserialize)]
-struct ReadFileInput {
-    path: String,
-    offset: Option<usize>,
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WriteFileInput {
-    path: String,
-    content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct EditFileInput {
-    path: String,
-    old_string: String,
-    new_string: String,
-    replace_all: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GlobSearchInputValue {
-    pattern: String,
-    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
