@@ -15,15 +15,19 @@ from router.server._telemetry_middleware import (
     emit_response_event,
     emit_dispatch_result,
 )
+from router.server._quota_middleware import (
+    get_bucket,
+    reserve_tokens,
+    quota_exhausted_result,
+    settle,
+)
 from router.catalog.registry import Registry
 from router.routing.policy import Policy
 from router.routing.hints import classify_task_hint
 from router.routing.decide import build_fallback_chain
 from router.dispatch.client import DispatchClient, DispatchResult
 from router.dispatch.fallback import run_fallback_chain
-from router.quota.bucket import BucketStore
 from router.quota.predict import estimate_request_tokens
-from router.adapters.hermes_ratelimit import RateLimitState
 from router.telemetry.spans import parse_traceparent, TraceContext
 from router.telemetry.store import Store
 
@@ -34,7 +38,6 @@ app = FastAPI(title="free-claw-router", lifespan=lifespan)
 
 _policy: Policy | None = None
 _dispatch = DispatchClient()
-_bucket_store = BucketStore()
 _telemetry_store: Store | None = None
 
 
@@ -129,12 +132,7 @@ async def chat_completions(request: Request) -> JSONResponse:
 
     async def call_one(cand):
         provider = next(p for p in registry.providers if p.provider_id == cand.provider_id)
-        bucket = _bucket_store.get(
-            cand.provider_id, cand.model_id,
-            rpm_limit=cand.model.free_tier.rpm,
-            tpm_limit=cand.model.free_tier.tpm,
-            daily_limit=cand.model.free_tier.daily,
-        )
+        bucket = get_bucket(cand)
 
         span_id = secrets.token_bytes(8)
         span_start = int(time.time() * 1000)
@@ -146,15 +144,14 @@ async def chat_completions(request: Request) -> JSONResponse:
             task_type=hint, started_at_ms=span_start,
         )
 
-        try:
-            tok = await bucket.reserve(tokens_estimated=estimated)
-        except RuntimeError:
+        tok = await reserve_tokens(bucket, tokens_estimated=estimated)
+        if tok is None:
             emit_quota_exhausted(
                 store,
                 span_id=span_id, span_start_ms=span_start,
                 provider_id=cand.provider_id, model_id=cand.model_id,
             )
-            return DispatchResult(429, {"error": "quota_exhausted"}, RateLimitState(), {})
+            return quota_exhausted_result()
 
         emit_quota_reserved(
             store,
@@ -168,10 +165,7 @@ async def chat_completions(request: Request) -> JSONResponse:
         if result.status == 200:
             emit_response_event(store, span_id=span_id, body=result.body)
 
-        if result.status == 200:
-            await bucket.commit(tok, tokens_actual=estimated)
-        else:
-            await bucket.rollback(tok)
+        await settle(bucket, tok, tokens_actual=estimated, success=result.status == 200)
 
         emit_dispatch_result(
             store,
