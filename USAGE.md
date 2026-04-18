@@ -350,6 +350,81 @@ cd rust
 cargo test --workspace
 ```
 
+## Dogfood 운영 가이드 (P5 L2)
+
+P5 L2 완료 후 1주 실사용 검증 단계.
+
+### 사전 준비
+
+1. `.env`에 필수 키 4개 입력:
+   - `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `CEREBRAS_API_KEY`
+   - 선택: `ANTHROPIC_API_KEY` (Claude review 워크플로용)
+2. `./scripts/bootstrap-dogfood.sh` — 7단계 환경 점검. 실패 단계 안내대로 보정 후 재실행.
+3. 사이드카 기동 (부트스트랩이 기동시키지 않은 경우):
+   ```
+   cd free-claw-router && uv run uvicorn router.server.openai_compat:app --port 7801
+   ```
+   (또는 부트스트랩 `--restart` 플래그)
+4. 현재 쉘에서 `export OPENAI_BASE_URL=http://127.0.0.1:7801` — claw가 이 URL로 요청 라우팅.
+
+### Day 1~7 리듬
+
+| 일자 | 활동 | 확인 지표 |
+|---|---|---|
+| Day 1 | 첫 세션 3회 (간단 리팩토링 수준) | 실패율 < 10%, TTFT 측정, 기본 텔레메트리 수집 |
+| Day 2~3 | 실사용 3~5세션/일 (P5 자체 작업에 claw 사용) | `skill_model_affinity` ≥ 3×3 (skill, model) 쌍 |
+| Day 4 | mempalace 조회 + P3 궤적 압축 확인 | `insights` ≥ 1건 |
+| Day 5 | 메타 분석 강제 트리거 (dev mode) | `suggestions` ≥ 3건 |
+| Day 6 | 일일 03:00 UTC 크론 대기 → 메타 PR 관찰 | PR ≥ 1건, Claude review `REQUEST_CHANGES` 없음 |
+| Day 7 | `/meta report` 감사 + 판정 체크리스트 | 스냅샷 작성, P6 입력 자료 |
+
+매일 끝에 `./scripts/dogfood-snapshot.sh` 실행 → `docs/superpowers/dogfood/YYYY-MM-DD/` 아카이브.
+
+### 수동 트리거 (개발자 편의)
+
+`FCR_DEV_TRIGGERS=1` 환경변수 설정 후 사이드카 기동 시 활성화:
+
+```bash
+# P4 파이프라인 상태 점검
+curl http://127.0.0.1:7801/healthz/pipeline
+
+# 현재 open 궤적 분석 즉시 실행
+curl -X POST http://127.0.0.1:7801/meta/analyze-now
+
+# 편집 제안 즉시 빌드 (일일 크론 우회)
+curl -X POST http://127.0.0.1:7801/meta/evolve-now
+
+# skill_model_affinity 재계산 (읽기 모델이므로 실질 no-op)
+curl -X POST http://127.0.0.1:7801/telemetry/readmodel/refresh
+```
+
+플래그 없으면 404 반환 — 프로덕션 경로 노출 위험 없음.
+
+### Day 7 판정 체크리스트
+
+P6 착수 전 **모두** 충족 확인:
+
+- [ ] 세션 실패율 < 10% (최근 7일)
+- [ ] OpenRouter p50 TTFT < 1.5s (SSE 적용 시)
+- [ ] `skill_model_affinity` (skill, model) 쌍 ≥ 10
+- [ ] affinity 보너스가 라우팅 결정 1건 이상 뒤집음 (events 조회로 검증)
+- [ ] P3 `insights` ≥ 3건
+- [ ] `meta_suggestions.json` ≥ 5건 누적
+- [ ] 메타 편집 PR ≥ 1건 자동 생성 + Claude review `REQUEST_CHANGES` 없음
+- [ ] `/meta/report`가 24h 활동을 공백 없이 렌더
+- [ ] `clawd meta report` 명령이 에러 없이 HTML 오픈
+- [ ] GC 크론 1회 이상 실행 + `gc_run` 이벤트 기록
+- [ ] `cargo test --workspace` 통과 유지 (flaky 기준 제외), `pytest` 통과 유지
+
+### 미충족 시
+
+1건이라도 ❌면 원인을 `docs/superpowers/dogfood/p5-blockers.md`에 기록.
+수정 스프린트(가변 기간) 후 재측정. P6 스펙은 Day 7 회고 문서(`p5-retrospective.md`)를 필수 입력으로 받음 — 회고 없이 P6 브레인스토밍 호출 금지.
+
+### affinity 헤더 활용
+
+claw/Rust 클라이언트가 `X-Skill-ID: <skill>` 헤더를 보내야 affinity 보너스가 발화합니다. 헤더 없으면 cold-start(보너스 0)로 동작 — 라우팅은 정적 정책만으로 결정. Rust CLI 쪽에서 스킬 기반 요청 시 헤더를 자동 주입하는 것은 P6 작업.
+
 ## Workspace overview
 
 Current Rust crates:
