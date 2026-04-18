@@ -198,6 +198,24 @@ async def lifespan(app: FastAPI):
 
     bg_scheduler.add_job(_daily_meta_evolution, "cron", hour=3, id="daily_meta_evolution")
 
+    # Daily store GC (P5 B-3) — two-phase safety, FCR_GC_PAUSED=1 to disable.
+    def _gc_job():
+        import logging
+        from router.server.gc import run_gc, GcConfig
+        gc_log = logging.getLogger("meta_gc")
+        data_dir = Path.home() / ".free-claw-router"
+        try:
+            stats = run_gc(
+                data_dir / "telemetry.db",
+                data_dir / "suggestions.jsonl",
+                GcConfig(),
+            )
+            gc_log.info("gc_run %s", stats)
+        except Exception:
+            gc_log.exception("gc_run failed")
+
+    bg_scheduler.add_job(_gc_job, "cron", hour=3, minute=15, id="daily_gc", replace_existing=True)
+
     bg_scheduler.start()
 
     app.state.telemetry_store = store
