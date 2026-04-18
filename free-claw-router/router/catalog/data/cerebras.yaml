@@ -2,6 +2,8 @@ provider_id: cerebras
 base_url: https://api.cerebras.ai/v1
 auth: {env: CEREBRAS_API_KEY, scheme: bearer}
 known_ratelimit_header_schema: generic
+capabilities:
+  sse: false
 models:
   - model_id: llama-3.3-70b
     status: active

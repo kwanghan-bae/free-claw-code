@@ -2,6 +2,8 @@ provider_id: openrouter
 base_url: https://openrouter.ai/api/v1
 auth: {env: OPENROUTER_API_KEY, scheme: bearer}
 known_ratelimit_header_schema: openrouter_standard
+capabilities:
+  sse: true
 models:
   - model_id: z-ai/glm-4.6:free
     status: active

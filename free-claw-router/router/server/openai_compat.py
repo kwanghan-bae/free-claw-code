@@ -1,7 +1,8 @@
+import logging
 from pathlib import Path
 import secrets
 from fastapi import FastAPI, Request, HTTPException, Body
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from router.server.lifespan import lifespan
 from router.server._telemetry_middleware import start_trace
 from router.server._quota_middleware import make_dispatch_call
@@ -19,10 +20,13 @@ from router.routing.policy import Policy
 from router.routing.decide import build_fallback_chain
 from router.dispatch.client import DispatchClient
 from router.dispatch.fallback import run_fallback_chain
+from router.dispatch.sse import dispatch_sse, provider_supports_sse
 from router.quota.predict import estimate_request_tokens
 from router.telemetry.spans import parse_traceparent
 from router.telemetry.store import Store
 from router.server.meta_report import router as meta_report_router
+
+logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "catalog" / "data"
 POLICY_PATH = Path(__file__).resolve().parent.parent / "routing" / "policy.yaml"
@@ -38,6 +42,13 @@ _cron = CronScheduler()
 
 def _resolve_store() -> Store | None:
     return _telemetry_store or getattr(app.state, "telemetry_store", None)
+
+
+def _provider_base_url(registry: Registry, provider_id: str) -> str | None:
+    for p in registry.providers:
+        if p.provider_id == provider_id:
+            return p.base_url
+    return None
 
 
 def _ensure_loaded() -> tuple[Registry, Policy]:
@@ -84,6 +95,32 @@ async def chat_completions(request: Request) -> JSONResponse:
     chain = build_fallback_chain(registry, policy, task_type=hint, skill_id=None)
     if not chain:
         raise HTTPException(status_code=503, detail=f"no candidates for task_type={hint}")
+
+    # SSE streaming dispatch (L2): passthrough when stream=true and the chosen
+    # provider supports SSE. Providers without capabilities.sse=true auto-downgrade
+    # to non-stream with a warning. SSE is commit-on-first-chunk, so we do not
+    # retry through the fallback chain once bytes have left the wire.
+    if payload.get("stream"):
+        head = chain[0]
+        if provider_supports_sse(head.provider_id):
+            sse_req = {**payload, "model": head.model_id}
+            provider_conf = {
+                "id": head.provider_id,
+                "base_url": _provider_base_url(registry, head.provider_id) or "",
+            }
+            return StreamingResponse(
+                dispatch_sse(provider_conf, sse_req),
+                media_type="text/event-stream",
+                headers={
+                    "X-Accel-Buffering": "no",  # nginx passthrough safety
+                    "Cache-Control": "no-cache",
+                },
+            )
+        logger.warning(
+            "provider %s does not support SSE; falling back to non-stream",
+            head.provider_id,
+        )
+        payload = {**payload, "stream": False}
 
     estimated = estimate_request_tokens(payload)
     call_one = make_dispatch_call(

@@ -2,6 +2,8 @@ provider_id: groq
 base_url: https://api.groq.com/openai/v1
 auth: {env: GROQ_API_KEY, scheme: bearer}
 known_ratelimit_header_schema: groq_standard
+capabilities:
+  sse: false
 models:
   - model_id: llama-3.3-70b-versatile
     status: active
