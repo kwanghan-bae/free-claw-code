@@ -31,6 +31,12 @@ use runtime::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+pub mod git;
+
+pub(crate) use git::{
+    current_git_branch, extract_commit_sha, git_stdout, resolve_main_ref,
+};
+
 /// Global task registry shared across tool invocations within a session.
 fn global_lsp_registry() -> &'static LspRegistry {
     use std::sync::OnceLock;
@@ -1967,38 +1973,6 @@ fn normalize_shell_command(command: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase()
-}
-
-fn resolve_main_ref(branch: &str) -> Option<String> {
-    let has_local_main = git_ref_exists("main");
-    let has_remote_main = git_ref_exists("origin/main");
-
-    if branch == "main" && has_remote_main {
-        Some("origin/main".to_string())
-    } else if has_local_main {
-        Some("main".to_string())
-    } else if has_remote_main {
-        Some("origin/main".to_string())
-    } else {
-        None
-    }
-}
-
-fn git_ref_exists(reference: &str) -> bool {
-    Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", reference])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn git_stdout(args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!stdout.is_empty()).then_some(stdout)
 }
 
 fn branch_divergence_output(
@@ -4398,24 +4372,6 @@ fn maybe_commit_provenance(result: Option<&str>) -> Option<LaneCommitProvenance>
         superseded_by: None,
         lineage: vec![commit],
     })
-}
-
-fn extract_commit_sha(result: &str) -> Option<String> {
-    result
-        .split(|c: char| !c.is_ascii_hexdigit())
-        .find(|token| token.len() >= 7 && token.len() <= 40)
-        .map(str::to_string)
-}
-
-fn current_git_branch() -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn append_agent_output(path: &str, suffix: &str) -> Result<(), String> {
