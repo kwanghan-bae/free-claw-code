@@ -29,3 +29,11 @@ targets:
   - path: router/meta/meta_evaluator.py
     type: config_only
     description: "Post-edit evaluator degradation threshold"
+  - path: free-claw-router/router/routing/affinity.py
+    type: config_only
+    editable_keys:
+      - AFFINITY_WEIGHT
+      - PRIOR_N
+      - CLIP_LO
+      - CLIP_HI
+    description: "Adaptive routing bonus parameters — bounded self-tuning via P4 meta-evolution"

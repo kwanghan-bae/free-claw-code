@@ -2,6 +2,8 @@ provider_id: ollama
 base_url: http://127.0.0.1:11434/v1
 auth: {env: OLLAMA_API_KEY, scheme: none}
 known_ratelimit_header_schema: none
+capabilities:
+  sse: false
 models:
   - model_id: qwen2.5-coder:14b
     status: active
