@@ -6,10 +6,13 @@
     clippy::unnecessary_wraps,
     clippy::unused_self
 )]
+mod date_utils;
 mod doctor;
 mod init;
 mod input;
 mod render;
+
+use date_utils::civil_from_days;
 
 use std::collections::BTreeSet;
 use std::env;
@@ -5739,31 +5742,6 @@ fn format_history_timestamp(timestamp_ms: u64) -> String {
 
     let (year, month, day) = civil_from_days(i64::try_from(days_since_epoch).unwrap_or(0));
     format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{subsec_ms:03}Z")
-}
-
-// Computes civil (Gregorian) year/month/day from days since the Unix epoch
-// (1970-01-01) using Howard Hinnant's `civil_from_days` algorithm.
-#[allow(
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap,
-    clippy::cast_possible_truncation
-)]
-fn civil_from_days(days: i64) -> (i32, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 {
-        z / 146_097
-    } else {
-        (z - 146_096) / 146_097
-    };
-    let doe = (z - era * 146_097) as u64; // [0, 146_096]
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let y = y + i64::from(m <= 2);
-    (y as i32, m as u32, d as u32)
 }
 
 fn render_prompt_history_report(entries: &[PromptHistoryEntry], limit: usize) -> String {
