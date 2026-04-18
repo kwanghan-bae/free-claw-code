@@ -27,6 +27,8 @@ use api::{
 };
 use plugins::PluginTool;
 use reqwest::blocking::Client;
+#[cfg(test)]
+use runtime::LaneEventName;
 use runtime::{
     dedupe_superseded_commit_events, load_system_prompt,
     lsp_client::LspRegistry,
@@ -42,8 +44,6 @@ use runtime::{
     PermissionPolicy, PromptCacheEvent, ProviderFallbackConfig, RuntimeError, Session, TaskPacket,
     ToolError, ToolExecutor,
 };
-#[cfg(test)]
-use runtime::LaneEventName;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -62,11 +62,11 @@ pub(crate) use file::{
 };
 pub(crate) use git::{current_git_branch, extract_commit_sha};
 pub(crate) use lsp::{run_lsp, LspInput};
+pub use search::ToolSearchOutput;
 pub(crate) use search::{
     canonical_tool_token, deferred_tool_specs, normalize_tool_search_query, run_tool_search,
     search_tool_specs, SearchableToolSpec, ToolSearchInput,
 };
-pub use search::ToolSearchOutput;
 
 /// Global task registry shared across tool invocations within a session.
 pub(crate) fn global_lsp_registry() -> &'static LspRegistry {

@@ -4,8 +4,8 @@
 use std::path::PathBuf;
 
 use runtime::{
-    check_freshness, execute_bash, BashCommandInput, BashCommandOutput, BranchFreshness,
-    LaneEvent, LaneEventName, LaneEventStatus, LaneFailureClass, PermissionMode,
+    check_freshness, execute_bash, BashCommandInput, BashCommandOutput, BranchFreshness, LaneEvent,
+    LaneEventName, LaneEventStatus, LaneFailureClass, PermissionMode,
 };
 use serde_json::json;
 

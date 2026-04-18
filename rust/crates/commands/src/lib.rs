@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub mod cron;
+pub mod meta_cmd;
 
 use plugins::{PluginError, PluginLoadFailure, PluginManager, PluginSummary};
 use runtime::{
@@ -1036,6 +1037,13 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         argument_hint: None,
         resume_supported: true,
     },
+    SlashCommandSpec {
+        name: "meta",
+        aliases: &[],
+        summary: "Meta-evolution audit: report | alerts | ack <id> | unblock <target>",
+        argument_hint: Some("<report|alerts|ack|unblock> [id|target]"),
+        resume_supported: true,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1181,6 +1189,10 @@ pub enum SlashCommand {
     History {
         count: Option<String>,
     },
+    Meta {
+        action: Option<String>,
+        target: Option<String>,
+    },
     Unknown(String),
 }
 
@@ -1282,6 +1294,7 @@ impl SlashCommand {
             Self::Sandbox => "/sandbox",
             Self::Mcp { .. } => "/mcp",
             Self::Export { .. } => "/export",
+            Self::Meta { .. } => "/meta",
             #[allow(unreachable_patterns)]
             _ => "/unknown",
         }
@@ -1492,6 +1505,10 @@ pub fn validate_slash_command_input(
         "add-dir" => SlashCommand::AddDir { path: remainder },
         "history" => SlashCommand::History {
             count: optional_single_arg(command, &args, "[count]")?,
+        },
+        "meta" => SlashCommand::Meta {
+            action: args.first().map(|s| (*s).to_string()),
+            target: args.get(1).map(|s| (*s).to_string()),
         },
         other => SlashCommand::Unknown(other.to_string()),
     }))
@@ -4112,6 +4129,7 @@ pub fn handle_slash_command(
         | SlashCommand::OutputStyle { .. }
         | SlashCommand::AddDir { .. }
         | SlashCommand::History { .. }
+        | SlashCommand::Meta { .. }
         | SlashCommand::Unknown(_) => None,
     }
 }
@@ -4649,7 +4667,7 @@ mod tests {
         assert!(help.contains("aliases: /skill"));
         assert!(!help.contains("/login"));
         assert!(!help.contains("/logout"));
-        assert_eq!(slash_command_specs().len(), 139);
+        assert_eq!(slash_command_specs().len(), 140);
         assert!(resume_supported_slash_commands().len() >= 39);
     }
 

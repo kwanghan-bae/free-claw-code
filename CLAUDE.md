@@ -52,7 +52,10 @@ python rust/scripts/run_mock_parity_diff.py
 
 - **텔레메트리 스키마**(`router/telemetry/migrations/001_initial.sql`): `traces / spans / events / evaluations` 4테이블이 P2·P3·P4가 공용으로 소비하는 계약. 스키마 변경은 마이그레이션 파일 추가로만.
 - **메타 편집 화이트리스트**(`free-claw-router/router/meta/meta_targets.yaml`): 자기수정 대상은 여기 등재된 파일만. 타입(`yaml` / `prompt_only` / `config_only`)도 강제. 임의 Rust·Python 로직 편집 금지.
-- **자기수정 가드레일**: 최소 3세션 합의 + 일 2건 상한 + 5세션 평가 후 자동 롤백 + `gh pr` + Claude 리뷰. 이 체인을 우회하는 코드는 머지 금지.
+- **자기수정 가드레일**: 최소 3세션 합의 + 일 2건 상한 + 5세션 평가 후 자동 롤백 + `gh pr` + Claude 리뷰 + **연속 2회 롤백 타깃 자동 블록**. 이 체인을 우회하는 코드는 머지 금지.
+- **타깃 자동 블록**(P5 B-4): 동일 `meta_targets.yaml` 항목이 연속 2회 롤백되면 `suggestion_store`가 해당 타깃 제안을 자동 기각 + `critical` `meta_alert` 발화. 해제는 수동만 — `clawd` REPL에서 `/meta unblock <target>` 또는 `POST /meta/unblock/<target>`.
+- **스토어 GC 정책**(P5 B-3): `spans` 30일 / `events` 90일 / `evaluations` 180일 / 제안 스토어 30일(`timestamp` 기준). 2단 커밋(dry-run → commit). 환경변수 오버라이드 `FCR_GC_SPAN_DAYS` / `FCR_GC_EVENT_DAYS` / `FCR_GC_EVAL_DAYS` / `FCR_GC_SUGGESTION_DAYS`, 전역 정지 `FCR_GC_PAUSED=1`. 일일 03:15 UTC 크론.
+- **제안 스토어 경로·포맷**: `~/.free-claw-router/meta_suggestions.json` — JSON array, `MetaSuggestion` 스키마(`target_file`, `timestamp` float, `rationale`, ...). 읽기 consumer는 이 포맷을 기준으로 어댑팅. 파일명·포맷 변경은 `SuggestionStore` + `/meta/report` + `gc.py` 3군데 동시 수정 필요.
 - **무료 전용 라우팅**(`router/routing/policy.yaml`): OpenRouter free / Groq / z.ai GLM / Cerebras / Ollama / LM Studio만 허용. 유료 provider 추가 금지.
 - **스킬 모델 친화도 읽기모델**(`skill_model_affinity`)은 P2 OpenSpace 통합점 — 컬럼 제거·의미 변경 주의.
 
