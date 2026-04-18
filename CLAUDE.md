@@ -33,7 +33,7 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
-현재 상태: clippy 통과(단, `rusty-claude-cli/src/main.rs:5761`의 `similar_names` 경고 1개는 잔존 — pedantic, CI 차단 아님).
+현재 상태: 워크스페이스 전체 `clippy -D warnings` 통과.
 
 ### Python 사이드카 (`free-claw-router/`에서 실행)
 ```
@@ -69,15 +69,20 @@ python rust/scripts/run_mock_parity_diff.py
 
 ## 알려진 미완·부채
 
-P4까지의 이월 항목 — 작업 시작 전 현재 상태 확인 필요:
+P5 Track A·B로 아래 이월 항목들은 해소됐습니다:
+- ~~Rust `CronCreate` → `/cron/register` 브릿지~~ ✅ P5 A-4 (`commands::cron`)
+- ~~`/internal/backpressure` HTTP 리스너~~ ✅ P5 A-5 (`runtime::backpressure_server`, axum 0.7)
+- ~~`openai_compat.py` 304 LOC 관심사 혼재~~ ✅ P5 A-3 (3개 미들웨어로 분리, 118 LOC)
+- ~~`main.rs` 11.8K LOC 거대 파일~~ ⚠ P5 A-1로 10.4K로 축소 + 6개 sibling 모듈화. 서브크레이트 분할은 L3 이월.
+- ~~`tools/lib.rs` 9.7K LOC~~ ⚠ P5 A-2로 6개 카테고리 모듈화(bash/browser/git/lsp/search/file). facade 잔존 8.86K는 scope 외 도구(TodoWrite/Skill/Agent/Task/Worker/MCP) — L3 추가 카테고리 후보.
+- ~~clippy `similar_names` 경고~~ ✅ P5 A-1.2 (`date_utils.rs`로 격리 + 파일 단위 allow)
 
-1. Rust `CronCreate` → 사이드카 `/cron/register` 브릿지 미연결 (Python 엔드포인트는 `router/server/openai_compat.py:291-300`에 대기)
-2. `/internal/backpressure` HTTP 리스너 없음(axum 도입 필요, P0 Task 8 Step 3)
-3. Hermes `git subtree` 다중 키 크리덴셜 회전 — env 어댑터만 동작
-4. Flaky test `resume_latest_restores_the_most_recent_managed_session` (`rusty-claude-cli/tests/resume_slash_commands.rs:179`)
-5. `openai_compat.py` 304 LOC 관심사 혼재(텔레메트리 + 쿼터 + P1 주입 + P3 넛지) — 모듈 분리 후보
-6. `analyzer_hook.py:23` TODO — P2-M2 벤더 analyzer 연결 미완
-7. 거대 파일: `rust/crates/rusty-claude-cli/src/main.rs`(11.8K LOC), `rust/crates/tools/src/lib.rs`(9.7K LOC) — 분할 후보
+남은 항목:
+1. **Flaky test** `resume_latest_restores_the_most_recent_managed_session` (`rusty-claude-cli/tests/resume_slash_commands.rs:179`) — CWD 의존, 메인에서도 실패. 세션 스토어 복구 경로 조사 필요.
+2. **Hermes `git subtree`** 다중 키 크리덴셜 회전 — env 어댑터만 동작 (L3).
+3. **`analyzer_hook.py:23`** TODO — P2-M2 벤더 analyzer 연결 미완.
+4. **B-4 call-site 연결** 대기 — `record_rollback`/`record_apply_success` 트래킹 함수는 있으나 실제 rollback/apply 코드 경로에 hook-up 안 됨. 5세션 평가 루프 설계 시 연결 예정.
+5. **제안 스토어 경로·포맷 의존**: `meta_suggestions.json` JSON array + `MetaSuggestion` 스키마. 변경 시 3군데(`SuggestionStore` + `/meta/report` + `gc.py`) 동시 수정.
 
 ## 참조 문서
 
