@@ -92,7 +92,19 @@ async def chat_completions(request: Request) -> JSONResponse:
 
     hint = resolve_task_hint(payload, request.headers.get("x-free-claw-hints"))
 
-    chain = build_fallback_chain(registry, policy, task_type=hint, skill_id=None)
+    # skill_id resolution for affinity-aware routing (C-1). Prefer the
+    # X-Skill-ID header so external callers (clawd REPL, automation)
+    # can tag requests without touching the JSON body; fall back to a
+    # top-level `skill_id` field for Rust callers that build the
+    # payload directly. Always strip the field from payload before
+    # dispatch — providers don't accept it and may reject unknown keys.
+    hdr_skill = request.headers.get("x-skill-id")
+    body_skill = payload.pop("skill_id", None)
+    skill_id: str | None = hdr_skill or body_skill or None
+    if not skill_id:  # treat "" as None
+        skill_id = None
+
+    chain = build_fallback_chain(registry, policy, task_type=hint, skill_id=skill_id)
     if not chain:
         raise HTTPException(status_code=503, detail=f"no candidates for task_type={hint}")
 
