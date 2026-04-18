@@ -10,9 +10,15 @@ mod date_utils;
 mod doctor;
 mod init;
 mod input;
+mod output_format;
 mod render;
 
 use date_utils::civil_from_days;
+use output_format::{
+    format_auto_compaction_notice, format_compact_report, format_cost_report, format_model_report,
+    format_model_switch_report, format_permissions_report, format_permissions_switch_report,
+    format_resume_report, render_resume_usage,
+};
 
 use std::collections::BTreeSet;
 use std::env;
@@ -84,12 +90,12 @@ const BUILD_TARGET: Option<&str> = option_env!("TARGET");
 const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
 const INTERNAL_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
 const POST_TOOL_STALL_TIMEOUT: Duration = Duration::from_secs(10);
-const PRIMARY_SESSION_EXTENSION: &str = "jsonl";
+pub(crate) const PRIMARY_SESSION_EXTENSION: &str = "jsonl";
 const LEGACY_SESSION_EXTENSION: &str = "json";
 const OFFICIAL_REPO_URL: &str = "https://github.com/ultraworkers/claw-code";
 const OFFICIAL_REPO_SLUG: &str = "ultraworkers/claw-code";
 const DEPRECATED_INSTALL_COMMAND: &str = "cargo install claw-code";
-const LATEST_SESSION_REFERENCE: &str = "latest";
+pub(crate) const LATEST_SESSION_REFERENCE: &str = "latest";
 const SESSION_REFERENCE_ALIASES: &[&str] = &[LATEST_SESSION_REFERENCE, "last", "recent"];
 const CLI_OPTION_SUGGESTIONS: &[&str] = &[
     "--help",
@@ -2399,138 +2405,6 @@ fn format_unknown_slash_command_message(name: &str) -> String {
     }
     message.push_str(" Use /help to list available commands.");
     message
-}
-
-fn format_model_report(model: &str, message_count: usize, turns: u32) -> String {
-    format!(
-        "Model
-  Current model    {model}
-  Session messages {message_count}
-  Session turns    {turns}
-
-Usage
-  Inspect current model with /model
-  Switch models with /model <name>"
-    )
-}
-
-fn format_model_switch_report(previous: &str, next: &str, message_count: usize) -> String {
-    format!(
-        "Model updated
-  Previous         {previous}
-  Current          {next}
-  Preserved msgs   {message_count}"
-    )
-}
-
-fn format_permissions_report(mode: &str) -> String {
-    let modes = [
-        ("read-only", "Read/search tools only", mode == "read-only"),
-        (
-            "workspace-write",
-            "Edit files inside the workspace",
-            mode == "workspace-write",
-        ),
-        (
-            "danger-full-access",
-            "Unrestricted tool access",
-            mode == "danger-full-access",
-        ),
-    ]
-    .into_iter()
-    .map(|(name, description, is_current)| {
-        let marker = if is_current {
-            "● current"
-        } else {
-            "○ available"
-        };
-        format!("  {name:<18} {marker:<11} {description}")
-    })
-    .collect::<Vec<_>>()
-    .join(
-        "
-",
-    );
-
-    format!(
-        "Permissions
-  Active mode      {mode}
-  Mode status      live session default
-
-Modes
-{modes}
-
-Usage
-  Inspect current mode with /permissions
-  Switch modes with /permissions <mode>"
-    )
-}
-
-fn format_permissions_switch_report(previous: &str, next: &str) -> String {
-    format!(
-        "Permissions updated
-  Result           mode switched
-  Previous mode    {previous}
-  Active mode      {next}
-  Applies to       subsequent tool calls
-  Usage            /permissions to inspect current mode"
-    )
-}
-
-fn format_cost_report(usage: TokenUsage) -> String {
-    format!(
-        "Cost
-  Input tokens     {}
-  Output tokens    {}
-  Cache create     {}
-  Cache read       {}
-  Total tokens     {}",
-        usage.input_tokens,
-        usage.output_tokens,
-        usage.cache_creation_input_tokens,
-        usage.cache_read_input_tokens,
-        usage.total_tokens(),
-    )
-}
-
-fn format_resume_report(session_path: &str, message_count: usize, turns: u32) -> String {
-    format!(
-        "Session resumed
-  Session file     {session_path}
-  Messages         {message_count}
-  Turns            {turns}"
-    )
-}
-
-fn render_resume_usage() -> String {
-    format!(
-        "Resume
-  Usage            /resume <session-path|session-id|{LATEST_SESSION_REFERENCE}>
-  Auto-save        .claw/sessions/<session-id>.{PRIMARY_SESSION_EXTENSION}
-  Tip              use /session list to inspect saved sessions"
-    )
-}
-
-fn format_compact_report(removed: usize, resulting_messages: usize, skipped: bool) -> String {
-    if skipped {
-        format!(
-            "Compact
-  Result           skipped
-  Reason           session below compaction threshold
-  Messages kept    {resulting_messages}"
-        )
-    } else {
-        format!(
-            "Compact
-  Result           compacted
-  Messages removed {removed}
-  Messages kept    {resulting_messages}"
-        )
-    }
-}
-
-fn format_auto_compaction_notice(removed: usize) -> String {
-    format!("[auto-compacted: removed {removed} messages]")
 }
 
 fn parse_git_status_metadata(status: Option<&str>) -> (Option<PathBuf>, Option<String>) {
