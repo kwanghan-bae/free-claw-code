@@ -1,4 +1,4 @@
-//! Tool search implementations (ToolSearch tool + registry search helpers).
+//! Tool search implementations (`ToolSearch` tool + registry search helpers).
 //! Extracted from tools/src/lib.rs under P5 A-2 for single-responsibility modules.
 
 use runtime::McpDegradedReport;
